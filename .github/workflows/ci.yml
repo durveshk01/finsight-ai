@@ -37,3 +37,29 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:ui
       - run: npm run build
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the complete Compose stack
+        run: docker compose up --build --detach --wait --wait-timeout 300
+      - name: Verify the frontend and authenticated financial API
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 2 http://localhost:3000/ -o /tmp/finsight-home.html
+          grep -q "FinSight" /tmp/finsight-home.html
+          curl --fail --silent --show-error http://localhost:8000/health | jq -e '.status == "ok"'
+          token=$(curl --fail --silent --show-error http://localhost:8000/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"demo@finsight.ai","password":"Demo1234!"}' | jq -er '.access_token')
+          curl --fail --silent --show-error http://localhost:8000/api/analytics/overview \
+            -H "Authorization: Bearer $token" | jq -e '.kpis.revenue >= 0 and .kpis.expenses >= 0'
+          curl --fail --silent --show-error 'http://localhost:8000/api/forecasts/cash-flow?horizon=7' \
+            -H "Authorization: Bearer $token" | jq -e '.days | length == 7'
+      - name: Show Compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
