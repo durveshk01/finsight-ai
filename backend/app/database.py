@@ -1,16 +1,35 @@
 import os
+import re
 from collections.abc import Generator
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./finsight.db")
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
+DATABASE_SCHEMA = os.getenv("DATABASE_SCHEMA", "").strip()
+
+
+def database_url_for_schema(database_url: str) -> str:
+    if not DATABASE_SCHEMA or database_url.startswith("sqlite"):
+        return database_url
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", DATABASE_SCHEMA):
+        raise ValueError("DATABASE_SCHEMA must be a lowercase PostgreSQL identifier")
+    url = make_url(database_url)
+    query = dict(url.query)
+    options = query.get("options", "")
+    search_path = f"-csearch_path={DATABASE_SCHEMA}"
+    query["options"] = f"{options} {search_path}".strip()
+    return url.set(query=query).render_as_string(hide_password=False)
+
+
+ENGINE_DATABASE_URL = database_url_for_schema(DATABASE_URL)
+connect_args = {"check_same_thread": False} if ENGINE_DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(ENGINE_DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
@@ -112,10 +131,14 @@ def _adopt_legacy_database(database_url: str) -> bool:
 def migrate_database() -> None:
     backend_root = Path(__file__).resolve().parents[1]
     database_url = os.getenv("DATABASE_URL", DATABASE_URL)
+    engine_url = database_url_for_schema(database_url)
+    if DATABASE_SCHEMA and not engine_url.startswith("sqlite"):
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS "{DATABASE_SCHEMA}"')
     config = Config(str(backend_root / "alembic.ini"))
     config.set_main_option("script_location", str(backend_root / "migrations").replace("%", "%%"))
-    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-    if _adopt_legacy_database(database_url):
+    config.set_main_option("sqlalchemy.url", engine_url.replace("%", "%%"))
+    if _adopt_legacy_database(engine_url):
         command.stamp(config, "head")
         return
     command.upgrade(config, "head")

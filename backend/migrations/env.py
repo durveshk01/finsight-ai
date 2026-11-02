@@ -2,13 +2,13 @@ from logging.config import fileConfig
 import os
 from sqlalchemy import engine_from_config, pool
 from alembic import context
-from app.database import Base
+from app.database import Base, database_url_for_schema
 from app import models  # noqa: F401
 
 config = context.config
 database_url = os.getenv("DATABASE_URL")
 if database_url:
-    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+    config.set_main_option("sqlalchemy.url", database_url_for_schema(database_url).replace("%", "%%"))
 if config.config_file_name:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 target_metadata = Base.metadata

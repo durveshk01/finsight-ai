@@ -4,7 +4,22 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
-from app.database import migrate_database
+from app.database import database_url_for_schema, migrate_database
+
+
+def test_database_schema_uses_a_validated_postgres_search_path(monkeypatch):
+    monkeypatch.setattr("app.database.DATABASE_SCHEMA", "finsight")
+    result = database_url_for_schema("postgresql+psycopg://user:secret@db.example.com/app")
+    assert "options=-csearch_path%3Dfinsight" in result
+    assert "secret" in result
+
+    monkeypatch.setattr("app.database.DATABASE_SCHEMA", 'other"; DROP SCHEMA public;--')
+    try:
+        database_url_for_schema("postgresql+psycopg://user:secret@db.example.com/app")
+    except ValueError as error:
+        assert "lowercase PostgreSQL identifier" in str(error)
+    else:
+        raise AssertionError("Unsafe schema identifier was accepted")
 
 
 def test_application_migrates_a_fresh_database_and_is_idempotent(tmp_path, monkeypatch):
