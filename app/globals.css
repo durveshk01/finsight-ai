@@ -1,0 +1,41 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #f6f8f7;
+  --surface: #ffffff;
+  --foreground: #16211d;
+  --muted: #718079;
+  --line: #e7ece9;
+  --green: #127255;
+  --green-soft: #e9f5ef;
+  --blue: #4778d0;
+}
+
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+::selection { background: #cbe8d8; }
+.dark {
+  --background: #111915;
+  --surface: #18211c;
+  --foreground: #e8efeb;
+  --muted: #9aa9a0;
+  --line: #2b3931;
+  --green-soft: #203b2e;
+}
+.card { border: 1px solid var(--line); background: var(--surface); border-radius: 14px; }
+.soft-shadow { box-shadow: 0 2px 7px rgba(26, 51, 39, .035), 0 14px 28px rgba(26, 51, 39, .025); }
+.thin-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+.thin-scrollbar::-webkit-scrollbar-thumb { background: #c9d4ce; border-radius: 12px; }
+.recharts-cartesian-grid-horizontal line { stroke: var(--line); }
+.recharts-text { fill: var(--muted); }

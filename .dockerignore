@@ -1,0 +1,10 @@
+.git
+.next
+node_modules
+backend/.venv
+backend/__pycache__
+backend/tests
+backend/finsight.db
+.env
+.env.*
+!.env.example
