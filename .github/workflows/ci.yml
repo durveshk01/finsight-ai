@@ -17,6 +17,10 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: pip install -r requirements.txt
         working-directory: backend
+      - run: alembic upgrade head
+        working-directory: backend
+      - run: alembic check
+        working-directory: backend
       - run: pytest -q
         working-directory: backend
 
@@ -29,6 +33,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:ui
       - run: npm run build

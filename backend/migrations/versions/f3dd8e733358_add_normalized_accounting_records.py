@@ -6,7 +6,7 @@ Create Date: 2026-11-02 17:15:13.835527
 
 """
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Sequence, Union
 
 from alembic import op
@@ -223,12 +223,19 @@ def upgrade() -> None:
     scenarios = connection.execute(sa.text('SELECT id, business_id, assumptions FROM financial_scenarios')).mappings().all()
     for scenario in scenarios:
         for key, value in json.loads(scenario["assumptions"]).items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                connection.execute(sa.text(
-                    'INSERT INTO scenario_assumptions (business_id, scenario_id, "key", value) '
-                    'VALUES (:business_id, :scenario_id, :key, :value)'
-                ), {"business_id": scenario["business_id"], "scenario_id": scenario["id"],
-                    "key": key, "value": str(Decimal(str(value)))})
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                continue
+            try:
+                numeric_value = Decimal(str(value))
+            except InvalidOperation:
+                continue
+            if not numeric_value.is_finite():
+                continue
+            connection.execute(sa.text(
+                'INSERT INTO scenario_assumptions (business_id, scenario_id, "key", value) '
+                'VALUES (:business_id, :scenario_id, :key, :value)'
+            ), {"business_id": scenario["business_id"], "scenario_id": scenario["id"],
+                "key": key, "value": str(numeric_value)})
     # ### end Alembic commands ###
 
 

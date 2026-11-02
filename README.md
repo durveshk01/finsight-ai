@@ -28,7 +28,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-This uses a local SQLite file by default. To use PostgreSQL, set `DATABASE_URL` to `postgresql+psycopg://...` before starting. The API seeds the demo account on its first start unless `SEED_DEMO=false`.
+This uses a local SQLite file by default. The API applies pending Alembic migrations before serving and seeds the demo account on its first start unless `SEED_DEMO=false`. To use PostgreSQL, set `DATABASE_URL` to `postgresql+psycopg://...` before starting.
 
 Frontend (Node 20.9+):
 

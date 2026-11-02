@@ -1161,18 +1161,6 @@ def generate_forecast(payload: ForecastGenerateIn, user: User = Depends(current_
     return result
 
 
-@router.get("/forecasts/{target}")
-def forecast_target(target: str, horizon: int = Query(30, ge=7, le=365), user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
-    if target not in ("revenue", "expenses"):
-        raise HTTPException(404, "Forecast target must be revenue or expenses")
-    business = _business(user, db, x_business_id)
-    kind = "income" if target == "revenue" else "expense"
-    result = _forecast_for(db, business, kind, horizon)
-    _persist_forecast(db, business, target, result)
-    db.commit()
-    return result
-
-
 @router.get("/forecasts/expenses/categories")
 def category_forecasts(horizon: int = Query(30, ge=7, le=365), user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
     business = _business(user, db, x_business_id)
@@ -1189,6 +1177,18 @@ def category_forecasts(horizon: int = Query(30, ge=7, le=365), user: User = Depe
 def forecast_cash(user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None), horizon: int = Query(90, ge=7, le=365)):
     business = _business(user, db, x_business_id)
     return _cash_projection(db, business, horizon)
+
+
+@router.get("/forecasts/{target}")
+def forecast_target(target: str, horizon: int = Query(30, ge=7, le=365), user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+    if target not in ("revenue", "expenses"):
+        raise HTTPException(404, "Forecast target must be revenue or expenses")
+    business = _business(user, db, x_business_id)
+    kind = "income" if target == "revenue" else "expense"
+    result = _forecast_for(db, business, kind, horizon)
+    _persist_forecast(db, business, target, result)
+    db.commit()
+    return result
 
 
 @router.post("/scenarios")

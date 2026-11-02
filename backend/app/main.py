@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -6,19 +7,24 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import models
 from .api import router
-from .database import Base, SessionLocal, engine
+from .database import SessionLocal, migrate_database
 from .rate_limit import RateLimiter, RateLimitMiddleware
 from .seed import seed_demo
 
+logger = logging.getLogger("finsight.startup")
+logger.setLevel(logging.INFO)
 rate_limiter = RateLimiter(os.getenv("REDIS_URL"))
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    logger.info("Applying database migrations")
+    migrate_database()
+    logger.info("Database migrations complete")
     if os.getenv("SEED_DEMO", "true").lower() == "true":
         with SessionLocal() as db:
             seed_demo(db)
+        logger.info("Demo data check complete")
     try:
         yield
     finally:

@@ -209,6 +209,9 @@ def test_forecast_snapshots_and_normalized_metrics_are_business_scoped(client: T
     assert len(history.json()) == 1
     assert len(history.json()[0]["predictions"]) == 7
     assert history.json()[0]["selected_model"] == forecast.json()["selected_model"]
+    cash_forecast = client.get("/api/forecasts/cash-flow?horizon=7", headers=headers)
+    assert cash_forecast.status_code == 200, cash_forecast.text
+    assert len(cash_forecast.json()["days"]) == 7
     client.post("/api/transactions", headers=headers, json={"kind": "income", "category": "Sales Revenue",
         "amount": "10000.00", "date": today, "description": "Large new sale", "status": "completed"})
     changed = client.post("/api/forecasts/generate", headers=headers,
