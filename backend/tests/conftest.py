@@ -13,6 +13,7 @@ from app.main import app
 @pytest.fixture()
 def client(monkeypatch) -> Generator[TestClient, None, None]:
     monkeypatch.setenv("SEED_DEMO", "false")
+    app.state.rate_limiter.clear_memory()
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     TestSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     Base.metadata.create_all(bind=engine)

@@ -16,6 +16,9 @@ __pycache__/
 venv/
 backend/finsight.db
 backend/test.db
+*.db
+*.sqlite
+*.sqlite3
 backend/.coverage
 backend/htmlcov/
 .DS_Store

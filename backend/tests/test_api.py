@@ -17,6 +17,16 @@ def test_registration_login_and_workspace_access(client: TestClient, account):
     assert other["business"]["currency"] == "USD"
 
 
+def test_auth_endpoints_are_rate_limited(client: TestClient):
+    payload = {"name": "Rate Limited", "password": "strong-password-123", "business_name": "Workspace", "currency": "USD"}
+    for index in range(5):
+        response = client.post("/api/auth/register", json={**payload, "email": f"rate-{index}@example.com"})
+        assert response.status_code == 200, response.text
+    limited = client.post("/api/auth/register", json={**payload, "email": "rate-6@example.com"})
+    assert limited.status_code == 429
+    assert limited.headers["Retry-After"]
+
+
 def test_transaction_crud_and_business_scope(client: TestClient, account):
     headers = auth(account)
     payload = {"kind": "income", "category": "Sales Revenue", "amount": "12800.45", "date": date.today().isoformat(), "description": "Customer settlement", "payment_method": "Bank transfer", "status": "completed"}

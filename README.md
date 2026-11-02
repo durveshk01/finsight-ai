@@ -49,6 +49,7 @@ Set `NEXT_PUBLIC_API_URL` to the API origin if it is not `http://localhost:8000`
 - Recurring transaction schedules for weekly, monthly, or quarterly cash obligations and receipts.
 - Deterministic scenario comparisons, rule based financial insights, notification center, and PDF / Excel / CSV exports.
 - Light and dark dashboard themes, responsive navigation, and Recharts visualizations.
+- Argon2 password hashing, expiring JWT sessions, business scoped access, audit events, and request throttling for authentication and API routes.
 - Docker Compose services for frontend, API, PostgreSQL, and Redis; initial Alembic migration; GitHub Actions build and test workflow.
 
 ## API areas
