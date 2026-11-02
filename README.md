@@ -42,9 +42,10 @@ Set `NEXT_PUBLIC_API_URL` to the API origin if it is not `http://localhost:8000`
 ## Features
 
 - Authenticated business workspaces and business scoped transaction records.
-- Transaction search, filters, create, edit, delete, CSV / Excel preview, duplicate detection, and import.
+- Transaction search, filters, create, edit, delete, CSV / Excel templates, preview, column mapping, duplicate detection, and import.
+- Normalized income and expense categories, bank / cash / card accounts, customer invoices, supplier bills, receivables, payables, and partial payments posted to the transaction ledger.
 - Decimal backed revenue, expense, net cash flow, margins, runway, receivables, payables, working capital, and category analytics.
-- Revenue, expense, category expense, and daily cash forecasts with model comparison and chronological holdout metrics.
+- Revenue, expense, category expense, and daily cash forecasts with model comparison, persisted forecast snapshots, and chronological validation metrics.
 - Reserve breach detection that combines historical forecasts with due dated pending and scheduled transactions.
 - Recurring transaction schedules for weekly, monthly, or quarterly cash obligations and receipts.
 - Deterministic scenario comparisons, rule based financial insights, notification center, and PDF / Excel / CSV exports.
@@ -60,13 +61,15 @@ All user data routes except login, registration, and health require `Authorizati
 | --- | --- |
 | Auth | `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me` |
 | Workspaces | `GET /api/businesses`, `POST /api/businesses`, `PATCH /api/businesses/current` |
-| Transactions | `GET/POST /api/transactions`, `PUT/DELETE /api/transactions/{id}`, import preview / confirm, CSV / Excel templates |
-| Analytics | `GET /api/analytics/overview`, `/revenue`, `/expenses`, `/cash-flow` |
-| Forecasts | `POST /api/forecasts/train` or `/train/async`, task status, `GET /api/forecasts/{revenue,expenses}`, `/models`, `/cash-flow`, `/expenses/categories` |
+| Categories, accounts, invoices | `GET/POST /api/categories`, `GET/POST /api/accounts`, account status, `GET/POST /api/invoices`, invoice payments and payment history |
+| Workspace team | `GET/POST /api/businesses/current/members`, `PATCH/DELETE /api/businesses/current/members/{id}`; owners manage access, accountants can edit financial records, viewers are read only |
+| Transactions | `GET/POST /api/transactions`, `PUT/DELETE /api/transactions/{id}`, import preview / mapping / confirm, CSV / Excel templates |
+| Analytics | `GET /api/analytics/overview`, `/revenue`, `/expenses`, `/cash-flow`, `/risk` |
+| Forecasts | `POST /api/forecasts/train`, `/train/async`, `/generate`, task status, `GET /api/forecasts/{revenue,expenses}`, `/models`, `/history`, `/cash-flow`, `/expenses/categories` |
 | Recurring | `GET/POST /api/recurring`, `PATCH/DELETE /api/recurring/{id}` |
 | Scenarios | `POST/GET /api/scenarios`, simulate, compare |
-| Insights and notifications | `GET /api/insights`, `POST /api/insights/generate`, `GET /api/notifications` |
-| Reports | `POST /api/reports/generate` with `format` `pdf`, `xlsx`, or `csv` |
+| Insights and notifications | `GET /api/insights`, `/insights/history`, `POST /api/insights/generate`, `GET /api/notifications` |
+| Reports | `POST /api/reports/generate` with `format` `pdf`, `xlsx`, or `csv`; `GET /api/reports` for export history |
 
 ## Project structure
 
@@ -74,7 +77,7 @@ All user data routes except login, registration, and health require `Authorizati
 app/                    Next.js App Router entry and global styles
 components/             Dashboard, visualizations, forms, and UI primitives
 backend/app/            FastAPI routes, ORM models, security, calculations, forecasting
-backend/migrations/     Alembic environment and initial schema migration
+backend/migrations/     Alembic environment and versioned financial schema migrations
 backend/tests/          Backend unit and API tests
 docs/                   Architecture, forecasting notes, and deployment guide
 ```

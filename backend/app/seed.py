@@ -6,7 +6,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Business, BusinessMember, RecurringTransaction, Transaction, User
+from .models import Account, Business, BusinessMember, RecurringTransaction, Transaction, TransactionCategory, User
 from .security import hash_password
 
 
@@ -68,14 +68,33 @@ def seed_demo(db: Session) -> None:
         if index in (5, 17):
             transactions.append(Transaction(business_id=business.id, kind="expense", category="Maintenance", amount=Decimal("68500.00"),
                 date=date(month.year, month.month, min(19, days)), description="Unexpected equipment repair", payment_method="Card", status="completed"))
-    db.add_all(transactions)
+    account = Account(business_id=business.id, name="Main operating account", account_type="bank",
+                      currency=business.currency, opening_balance=Decimal("1250000.00"))
+    db.add(account)
+    db.flush()
+    category_names = {("income" if row.kind == "income" else "expense", row.category) for row in transactions}
+    category_names.update({("income", name) for name in ("Sales Revenue", "Service Revenue", "Interest Income", "Investment Income", "Other Income")})
+    category_names.update({("expense", name) for name in ("Salaries", "Rent", "Utilities", "Marketing", "Inventory", "Transportation", "Software Subscriptions", "Taxes", "Loan Repayments", "Maintenance", "Other Expenses")})
+    category_rows = [TransactionCategory(business_id=business.id, kind=kind, name=name,
+                                         is_system=name in {"Sales Revenue", "Service Revenue", "Interest Income", "Investment Income", "Other Income", "Salaries", "Rent", "Utilities", "Marketing", "Inventory", "Transportation", "Software Subscriptions", "Taxes", "Loan Repayments", "Maintenance", "Other Expenses"})
+                     for kind, name in sorted(category_names)]
+    db.add_all(category_rows)
+    db.flush()
+    category_ids = {(row.kind, row.name): row.id for row in category_rows}
+    for row in transactions:
+        row.category_id = category_ids[(row.kind, row.category)]
+        row.account_id = account.id
     # Confirmed and pending items stay separate from historical actuals and enter forecasts on their due date.
-    db.add_all([
+    scheduled = [
         Transaction(business_id=business.id, kind="expense", category="Salaries", amount=Decimal("251000.00"), date=today + timedelta(days=5), description="Next payroll", payment_method="Bank transfer", status="scheduled", reference="DEMO-SCHED-PAYROLL"),
         Transaction(business_id=business.id, kind="expense", category="Rent", amount=Decimal("62000.00"), date=today + timedelta(days=8), description="Next month rent", payment_method="Bank transfer", status="scheduled", reference="DEMO-SCHED-RENT"),
         Transaction(business_id=business.id, kind="income", category="Service Revenue", amount=Decimal("145000.00"), date=today + timedelta(days=14), description="Customer invoice due", payment_method="Bank transfer", status="pending", reference="DEMO-AR-001"),
         Transaction(business_id=business.id, kind="expense", category="Inventory", amount=Decimal("78000.00"), date=today + timedelta(days=19), description="Supplier payment due", payment_method="Bank transfer", status="pending", reference="DEMO-AP-001"),
-    ])
+    ]
+    for row in scheduled:
+        row.category_id = category_ids[(row.kind, row.category)]
+        row.account_id = account.id
+    db.add_all([*transactions, *scheduled])
     db.add_all([
         RecurringTransaction(business_id=business.id, kind="expense", category="Salaries", amount=Decimal("251000.00"), frequency="monthly", next_date=today + timedelta(days=5), description="Monthly payroll", payment_method="Bank transfer"),
         RecurringTransaction(business_id=business.id, kind="expense", category="Rent", amount=Decimal("62000.00"), frequency="monthly", next_date=today + timedelta(days=8), description="Studio rent", payment_method="Bank transfer"),

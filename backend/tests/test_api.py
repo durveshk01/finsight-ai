@@ -1,5 +1,7 @@
 from datetime import date, timedelta
+from io import BytesIO
 
+from openpyxl import load_workbook
 from fastapi.testclient import TestClient
 
 from .conftest import auth
@@ -81,6 +83,144 @@ def test_import_preview_duplicate_detection_and_exports(client: TestClient, acco
     xlsx_template = client.get("/api/transactions/template.xlsx")
     assert xlsx_template.status_code == 200
     assert xlsx_template.content[:2] == b"PK"
+
+
+def test_import_preview_allows_explicit_column_mapping(client: TestClient, account):
+    headers = auth(account)
+    data = b"Transaction On,Value INR,Flow,Payee,Notes\n2026-04-03,925.50,Credit,Sales Revenue,Remapped transaction\n"
+    auto = client.post("/api/transactions/import/preview", headers=headers,
+                       files={"file": ("statement.csv", data, "text/csv")})
+    assert auto.status_code == 422
+    mapped = client.post("/api/transactions/import/preview", headers=headers,
+                         files={"file": ("statement.csv", data, "text/csv")},
+                         data={"mapping": '{"date":"Transaction On","amount":"Value INR","kind":"Flow","category":"Payee","description":"Notes"}'})
+    assert mapped.status_code == 200, mapped.text
+    assert mapped.json()["valid_count"] == 1
+    assert mapped.json()["rows"][0] == {
+        "date": "2026-04-03", "amount": "925.50", "kind": "income", "category": "Sales Revenue",
+        "description": "Remapped transaction", "status": "completed", "payment_method": "Imported",
+    }
+
+
+def test_financial_reports_include_forecasts_charts_and_history(client: TestClient, account):
+    headers = auth(account)
+    pdf = client.post("/api/reports/generate", headers=headers, json={"format": "pdf", "months": 3, "report_type": "risk"})
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.content.startswith(b"%PDF")
+
+    workbook_response = client.post("/api/reports/generate", headers=headers, json={"format": "xlsx", "months": 3, "report_type": "forecast"})
+    assert workbook_response.status_code == 200, workbook_response.text
+    workbook = load_workbook(BytesIO(workbook_response.content))
+    assert {"Financial summary", "Monthly summary", "90-day forecast", "Forecast model metrics", "Insights", "Methodology"}.issubset(workbook.sheetnames)
+    assert workbook["Monthly summary"]._charts
+
+    history = client.get("/api/reports", headers=headers)
+    assert history.status_code == 200
+    assert [item["format"] for item in history.json()] == ["xlsx", "pdf"]
+    assert history.json()[0]["report_type"] == "forecast"
+
+
+def test_report_type_validation_and_business_isolation(client: TestClient, account):
+    headers = auth(account)
+    invalid = client.post("/api/reports/generate", headers=headers, json={"format": "pdf", "report_type": "unknown"})
+    assert invalid.status_code == 422
+    other = client.post("/api/auth/register", json={"name": "Morgan Owner", "email": "reports@example.com", "password": "different-password-456", "business_name": "Morgan Goods", "currency": "USD"}).json()
+    other_headers = {"Authorization": f"Bearer {other['access_token']}", "X-Business-Id": str(other["business"]["id"])}
+    assert client.get("/api/reports", headers=other_headers).json() == []
+
+
+def test_accounts_invoices_partial_payments_and_cash_projection(client: TestClient, account):
+    headers = auth(account)
+    account_response = client.post("/api/accounts", headers=headers, json={
+        "name": "Operating bank", "account_type": "bank", "opening_balance": "1000.00"
+    })
+    assert account_response.status_code == 200, account_response.text
+    account_id = account_response.json()["id"]
+    assert account_response.json()["current_balance"] == 1000.0
+    categories = client.get("/api/categories?kind=income", headers=headers).json()
+    assert "Sales Revenue" in {row["name"] for row in categories}
+
+    due = date.today() + timedelta(days=10)
+    invoice_response = client.post("/api/invoices", headers=headers, json={
+        "direction": "receivable", "invoice_number": "AR-1001", "counterparty": "Acme Co",
+        "issue_date": date.today().isoformat(), "due_date": due.isoformat(), "amount": "500.25",
+        "category": "Sales Revenue", "account_id": account_id,
+    })
+    assert invoice_response.status_code == 200, invoice_response.text
+    invoice = invoice_response.json()
+    assert invoice["amount_due"] == 500.25
+    assert client.get("/api/analytics/overview", headers=headers).json()["kpis"]["accounts_receivable"] == 500.25
+    projection = client.get("/api/analytics/cash-flow?horizon=15", headers=headers).json()
+    assert projection["confirmed_obligations"] == 1
+    assert next(day for day in projection["days"] if day["date"] == due.isoformat())["inflows"] == 500.25
+
+    partial = client.post(f"/api/invoices/{invoice['id']}/payments", headers=headers, json={
+        "amount": "200.10", "paid_on": date.today().isoformat(), "account_id": account_id,
+        "payment_method": "Bank transfer", "reference": "PAY-1",
+    })
+    assert partial.status_code == 200, partial.text
+    assert partial.json()["invoice"]["status"] == "partially_paid"
+    assert partial.json()["invoice"]["amount_due"] == 300.15
+    assert client.get("/api/analytics/overview", headers=headers).json()["kpis"]["accounts_receivable"] == 300.15
+    assert client.get("/api/accounts", headers=headers).json()[0]["current_balance"] == 1200.1
+    assert len(client.get(f"/api/invoices/{invoice['id']}/payments", headers=headers).json()) == 1
+    overpayment = client.post(f"/api/invoices/{invoice['id']}/payments", headers=headers, json={
+        "amount": "400.00", "paid_on": date.today().isoformat(),
+    })
+    assert overpayment.status_code == 422
+
+    other = client.post("/api/auth/register", json={"name": "Other Owner", "email": "invoices@example.com",
+        "password": "another-strong-password", "business_name": "Other Workspace", "currency": "USD"}).json()
+    other_headers = {"Authorization": f"Bearer {other['access_token']}"}
+    assert client.get("/api/invoices", headers=other_headers).json()["items"] == []
+    assert client.get(f"/api/invoices/{invoice['id']}/payments", headers=other_headers).status_code == 404
+
+    payable = client.post("/api/invoices", headers=headers, json={
+        "direction": "payable", "invoice_number": "AP-1001", "counterparty": "Studio Rent Ltd",
+        "issue_date": date.today().isoformat(), "due_date": due.isoformat(), "amount": "800.00",
+        "category": "Rent", "account_id": account_id,
+    })
+    assert payable.status_code == 200, payable.text
+    assert client.get("/api/analytics/overview", headers=headers).json()["kpis"]["accounts_payable"] == 800.0
+    cash_after_invoice = client.get("/api/analytics/cash-flow?horizon=15", headers=headers).json()
+    due_point = next(day for day in cash_after_invoice["days"] if day["date"] == due.isoformat())
+    assert due_point["outflows"] >= 800.0
+    soon = client.post("/api/invoices", headers=headers, json={
+        "direction": "payable", "invoice_number": "AP-SOON", "counterparty": "Utilities Co",
+        "issue_date": date.today().isoformat(), "due_date": (date.today() + timedelta(days=3)).isoformat(),
+        "amount": "50.00", "category": "Utilities", "account_id": account_id,
+    })
+    assert soon.status_code == 200
+    client.post("/api/insights/generate", headers=headers)
+    notifications = client.get("/api/notifications", headers=headers).json()
+    assert any("due in the next 7 days" in item["title"].lower() for item in notifications)
+
+
+def test_forecast_snapshots_and_normalized_metrics_are_business_scoped(client: TestClient, account):
+    headers = auth(account)
+    today = date.today().isoformat()
+    client.post("/api/transactions", headers=headers, json={"kind": "income", "category": "Sales Revenue",
+        "amount": "123.45", "date": today, "description": "First sale", "status": "completed"})
+    forecast = client.get("/api/forecasts/revenue?horizon=7", headers=headers)
+    assert forecast.status_code == 200, forecast.text
+    assert len(forecast.json()["predictions"]) == 7
+    history = client.get("/api/forecasts/history?target=revenue", headers=headers)
+    assert history.status_code == 200
+    assert len(history.json()) == 1
+    assert len(history.json()[0]["predictions"]) == 7
+    assert history.json()[0]["selected_model"] == forecast.json()["selected_model"]
+    client.post("/api/transactions", headers=headers, json={"kind": "income", "category": "Sales Revenue",
+        "amount": "10000.00", "date": today, "description": "Large new sale", "status": "completed"})
+    changed = client.post("/api/forecasts/generate", headers=headers,
+                          json={"target": "revenue", "horizon": 7})
+    assert changed.status_code == 200, changed.text
+    notifications = client.get("/api/notifications", headers=headers).json()
+    assert any("forecast changed significantly" in item["title"].lower() for item in notifications)
+
+    other = client.post("/api/auth/register", json={"name": "Forecast Owner", "email": "forecast@example.com",
+        "password": "another-strong-password", "business_name": "Forecast Workspace", "currency": "USD"}).json()
+    other_headers = {"Authorization": f"Bearer {other['access_token']}"}
+    assert client.get("/api/forecasts/history", headers=other_headers).json() == []
 
 
 def test_scenario_simulation_and_insights(client: TestClient, account):
