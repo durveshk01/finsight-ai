@@ -12,11 +12,10 @@ PostgreSQL, Redis, API, and frontend run as separate services. PostgreSQL and Re
 ## Hosted deployment
 
 - Frontend: deploy the root Next.js project to Vercel. Set `NEXT_PUBLIC_API_URL` to the public API origin at build time.
-- API: deploy `backend/Dockerfile` to Render, Fly.io, or another persistent container platform. Set `DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGINS`, `REDIS_URL`, and `SEED_DEMO`.
+- API: `render.yaml` defines the free Render Docker service. It runs in Oregon beside the existing Render Postgres database, keeps all FinSight tables in the `finsight` schema, generates its own JWT secret, and allows only the Vercel demo origin. Sync it from Render's **New Blueprint Instance** flow after connecting the GitHub repository.
 - The API rate limiter uses Redis when `REDIS_URL` is set. Without Redis, development uses a bounded in-process fallback; production should use Redis for limits shared across workers.
-- Database: use a managed PostgreSQL service and keep `DATABASE_URL` private.
-- Background work: attach Redis and run the worker command `celery -A app.tasks.celery_app worker --loglevel=info` from the backend image. Docker Compose starts this worker automatically.
-- Update CORS to the exact deployed frontend origin. Change default credentials and secrets before making a demo deployment public.
+- The free demo shares an existing Render Postgres instance in its own schema. The database expires on 2026-11-27 under Render's free database policy; export the schema and data before then or the demo will lose persistence. The free API has no Celery worker, so use synchronous forecast training; Docker Compose includes Redis and a worker for local development.
+- Update `NEXT_PUBLIC_API_URL` to the actual Render API URL before the Vercel production build. Keep all production secrets out of Git.
 
 ## Free-tier limits
 
@@ -27,6 +26,4 @@ Provider limits checked on 2026-11-02:
 - [Supabase Free](https://supabase.com/pricing) currently includes a 500 MB database and at most two active free projects; projects with low activity may be paused after a week ([pause policy](https://supabase.com/docs/guides/platform/free-project-pausing)). It can support a non-critical demo, but it does not provide the same continuity as an always-on production database.
 - [Upstash Redis Free](https://upstash.com/pricing/redis) currently includes up to 500,000 commands per month and 256 MB of data, for prototypes and hobby projects.
 
-These limits mean a free deployment is a demo with cold starts, possible pauses, and reduced background-processing reliability. Do not describe it as production-ready. Select hosting based on commercial use and a monthly limit before provisioning services.
-
-No live URL is attached to this repository yet. Production PostgreSQL and Redis instances, their connection strings, a public API origin, and the matching CORS and frontend environment values must be provisioned before the complete application can be deployed and verified. Keep all production secrets out of Git.
+These limits mean the hosted version is a noncommercial demo with cold starts, possible pauses, and reduced background-processing reliability. Do not use it for live business records or describe it as production-ready.

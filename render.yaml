@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: finsight-api-public
+    runtime: docker
+    repo: https://github.com/durveshk01/finsight-ai
+    branch: main
+    plan: free
+    region: oregon
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cloudvault-db
+          property: connectionString
+      - key: DATABASE_SCHEMA
+        value: finsight
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SEED_DEMO
+        value: "true"
+      - key: CORS_ORIGINS
+        value: https://finsight-ai-demo.vercel.app
