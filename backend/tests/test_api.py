@@ -258,3 +258,130 @@ def test_recurring_due_dates_are_projected_without_double_counting(client: TestC
     point = next(item for item in result["days"] if item["date"] == due.isoformat())
     assert point["outflows"] == 500.0
 
+
+def test_account_transfers_do_not_distort_revenue_or_expenses(client: TestClient, account):
+    headers = auth(account)
+    # Create Bank A and Bank B
+    acc_a = client.post("/api/accounts", headers=headers, json={"name": "Bank Alpha", "account_type": "bank", "opening_balance": "5000.00"}).json()
+    acc_b = client.post("/api/accounts", headers=headers, json={"name": "Bank Beta", "account_type": "bank", "opening_balance": "2000.00"}).json()
+
+    today = date.today().isoformat()
+    # Record income into Bank A
+    client.post("/api/transactions", headers=headers, json={"kind": "income", "category": "Sales Revenue", "amount": "1000.00", "date": today, "account_id": acc_a["id"], "description": "Customer sale"})
+    # Record transfer of 1500 from Bank A to Bank B
+    transfer = client.post("/api/transactions", headers=headers, json={"kind": "transfer", "category": "Transfer", "amount": "1500.00", "date": today, "account_id": acc_a["id"], "to_account_id": acc_b["id"], "description": "Inter-account transfer"})
+    assert transfer.status_code == 200, transfer.text
+    assert transfer.json()["to_account_id"] == acc_b["id"]
+
+    # Check accounts
+    accounts = client.get("/api/accounts", headers=headers).json()
+    alpha = next(a for a in accounts if a["id"] == acc_a["id"])
+    beta = next(a for a in accounts if a["id"] == acc_b["id"])
+    # Alpha: 5000 opening + 1000 income - 1500 transfer out = 4500
+    assert alpha["current_balance"] == 4500.0
+    # Beta: 2000 opening + 1500 transfer in = 3500
+    assert beta["current_balance"] == 3500.0
+
+    # Verify overview does not count transfer as revenue or expense
+    overview = client.get("/api/analytics/overview?months=1", headers=headers).json()
+    assert overview["kpis"]["revenue"] == 1000.0
+    assert overview["kpis"]["expenses"] == 0.0
+    assert overview["kpis"]["net_cash_flow"] == 1000.0
+
+
+def test_bulk_transactions_operations(client: TestClient, account):
+    headers = auth(account)
+    today = date.today().isoformat()
+    t1 = client.post("/api/transactions", headers=headers, json={"kind": "expense", "category": "Rent", "amount": "100.00", "date": today, "status": "completed"}).json()["id"]
+    t2 = client.post("/api/transactions", headers=headers, json={"kind": "expense", "category": "Rent", "amount": "200.00", "date": today, "status": "completed"}).json()["id"]
+
+    # Bulk update category
+    cat_update = client.post("/api/transactions/bulk", headers=headers, json={"action": "update_category", "transaction_ids": [t1, t2], "category": "Utilities"})
+    assert cat_update.status_code == 200
+    assert cat_update.json()["affected"] == 2
+
+    # Bulk delete
+    del_res = client.post("/api/transactions/bulk", headers=headers, json={"action": "delete", "transaction_ids": [t1, t2]})
+    assert del_res.status_code == 200
+    assert del_res.json()["affected"] == 2
+
+
+def test_accounts_receivable_and_payable_ageing_reports(client: TestClient, account):
+    headers = auth(account)
+    today = date.today()
+    # Add an overdue receivable invoice (20 days past due) and a current one
+    client.post("/api/invoices", headers=headers, json={
+        "direction": "receivable", "invoice_number": "AR-OVERDUE", "counterparty": "Apex Corp",
+        "issue_date": (today - timedelta(days=50)).isoformat(), "due_date": (today - timedelta(days=20)).isoformat(),
+        "amount": "1500.00", "category": "Sales Revenue"
+    })
+    client.post("/api/invoices", headers=headers, json={
+        "direction": "receivable", "invoice_number": "AR-CURRENT", "counterparty": "Apex Corp",
+        "issue_date": today.isoformat(), "due_date": (today + timedelta(days=15)).isoformat(),
+        "amount": "800.00", "category": "Sales Revenue"
+    })
+
+    # Query AR ageing
+    ar = client.get("/api/invoices/receivables/ageing", headers=headers)
+    assert ar.status_code == 200, ar.text
+    ar_data = ar.json()
+    assert ar_data["total_outstanding"] == 2300.0
+    assert ar_data["total_overdue"] == 1500.0
+    assert ar_data["buckets"]["days_1_30"] == 1500.0
+    assert ar_data["buckets"]["current"] == 800.0
+    assert len(ar_data["customers"]) == 1
+    assert ar_data["customers"][0]["customer"] == "Apex Corp"
+
+
+def test_cloud_synchronization_pull_and_push_with_idempotency(client: TestClient, account):
+    headers = auth(account)
+    # Check initial status
+    status = client.get("/api/sync/status", headers=headers)
+    assert status.status_code == 200, status.text
+
+    # Push a mutation batch from client
+    client_mut_id = "draft-uuid-001"
+    push_payload = {
+        "mutations": [
+            {
+                "client_mutation_id": client_mut_id,
+                "entity_type": "transaction",
+                "action": "create",
+                "data": {
+                    "kind": "income",
+                    "category": "Sales Revenue",
+                    "amount": 750.50,
+                    "date": date.today().isoformat(),
+                    "description": "Offline mobile sale",
+                    "payment_method": "UPI",
+                    "status": "completed",
+                }
+            }
+        ]
+    }
+    push_res = client.post("/api/sync/push", headers=headers, json=push_payload)
+    assert push_res.status_code == 200, push_res.text
+    applied = push_res.json()["applied"]
+    assert len(applied) == 1
+    assert applied[0]["status"] == "created"
+
+    # Idempotent push of same mutation should not create a duplicate
+    push_retry = client.post("/api/sync/push", headers=headers, json=push_payload)
+    assert push_retry.status_code == 200
+    assert push_retry.json()["applied"][0]["status"] == "already_applied"
+
+    # Pull changes
+    pull_res = client.post("/api/sync/pull", headers=headers, json={"since_seq": 0})
+    assert pull_res.status_code == 200, pull_res.text
+    assert pull_res.json()["mode"] == "baseline"
+    assert any(t["description"] == "Offline mobile sale" for t in pull_res.json()["data"]["transactions"])
+
+
+def test_flexible_overview_date_filters_and_period_comparisons(client: TestClient, account):
+    headers = auth(account)
+    res_7d = client.get("/api/analytics/overview?preset=last_7_days", headers=headers)
+    assert res_7d.status_code == 200
+    assert res_7d.json()["period"]["preset"] == "last_7_days"
+    assert "period_revenue_growth_pct" in res_7d.json()["kpis"]
+
+

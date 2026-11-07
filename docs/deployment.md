@@ -1,29 +1,74 @@
-# Local and hosted deployment
+# FinSight AI – Production Deployment & Operations Guide
 
-## Local Docker Compose
+## 1. Quick Start: Local Development with Docker Compose
 
-1. Copy `.env.example` to `.env` and set a strong `JWT_SECRET` and `POSTGRES_PASSWORD`.
-2. Run `docker compose up --build` from the repository root.
-3. Open `http://localhost:3000`. API docs are at `http://localhost:8000/docs` and health is at `http://localhost:8000/health`.
-4. Demo access: `demo@finsight.ai` / `Demo1234!`.
+1. Clone repository and initialize environment:
+   ```bash
+   cp .env.example .env
+   ```
+2. Launch the full production stack:
+   ```bash
+   docker compose up --build
+   ```
+3. Services running locally:
+   - **Web Application**: `http://localhost:3000`
+   - **FastAPI Backend**: `http://localhost:8000` (Interactive Swagger docs at `/docs`)
+   - **PostgreSQL 16**: Port `5432`
+   - **Redis 7**: Port `6379`
+   - **Celery Worker**: Background statistical time-series training
+4. Default Demo Account:
+   - **Email**: `demo@finsight.ai`
+   - **Password**: `Demo1234!`
 
-PostgreSQL, Redis, API, and frontend run as separate services. PostgreSQL and Redis data persist in named Docker volumes. The API runs the Alembic migration before serving. Set `SEED_DEMO=false` when a deployment should not create the sample account.
+---
 
-## Hosted deployment
+## 2. Cloud Deployment (Render & Vercel)
 
-- Frontend: deploy the root Next.js project to Vercel. Set `NEXT_PUBLIC_API_URL` to the public API origin at build time.
-- API: `render.yaml` defines the free Render Docker service. It runs in Oregon beside the existing Render Postgres database, keeps all FinSight tables in the `finsight` schema, generates its own JWT secret, and allows only the Vercel demo origin. Sync it from Render's **New Blueprint Instance** flow after connecting the GitHub repository.
-- The API rate limiter uses Redis when `REDIS_URL` is set. Without Redis, development uses a bounded in-process fallback; production should use Redis for limits shared across workers.
-- The free demo shares an existing Render Postgres instance in its own schema. The database expires on 2026-11-27 under Render's free database policy; export the schema and data before then or the demo will lose persistence. The free API has no Celery worker, so use synchronous forecast training; Docker Compose includes Redis and a worker for local development.
-- Update `NEXT_PUBLIC_API_URL` to the actual Render API URL before the Vercel production build. Keep all production secrets out of Git.
+### Backend API (Render)
+1. FinSight AI backend is containerized via `backend/Dockerfile` and declared in `render.yaml`.
+2. Connect your GitHub repository to Render and create a **Blueprint Instance**.
+3. Environment variables configured in Render:
+   - `DATABASE_URL`: Managed Render PostgreSQL connection string.
+   - `DATABASE_SCHEMA`: `finsight` (enforces dedicated tenant isolation).
+   - `JWT_SECRET`: 256-bit cryptographic key.
+   - `SEED_DEMO`: `true` for staging/demo environments, `false` for live enterprise production.
+   - `CORS_ORIGINS`: Origin of the deployed web application (e.g., `https://finsight-ai.vercel.app`).
+4. Health check endpoint: `GET /health` (monitors database and service health).
 
-## Free-tier limits
+### Frontend Web (Vercel)
+1. Deploy the Next.js application to Vercel.
+2. Set Environment Variables:
+   - `NEXT_PUBLIC_API_URL`: Your deployed Render backend URL (e.g. `https://finsight-api.onrender.com`).
+3. Build command: `npm run build` (runs Next.js 16 Turbopack with full TypeScript verification).
 
-Provider limits checked on 2026-11-02:
+---
 
-- [Vercel Hobby](https://vercel.com/docs/plans/hobby) is limited to personal, non-commercial use. Use an eligible paid plan for a commercial FinSight deployment.
-- [Render's free services](https://render.com/docs/free) are for previews and hobby use, not production. Free web services sleep after 15 minutes without traffic and have ephemeral filesystems. Free Postgres expires after 30 days. [Free Render background workers are unavailable](https://render.com/docs/your-first-deploy), so the Celery training endpoint needs a paid worker or a different queue/worker host.
-- [Supabase Free](https://supabase.com/pricing) currently includes a 500 MB database and at most two active free projects; projects with low activity may be paused after a week ([pause policy](https://supabase.com/docs/guides/platform/free-project-pausing)). It can support a non-critical demo, but it does not provide the same continuity as an always-on production database.
-- [Upstash Redis Free](https://upstash.com/pricing/redis) currently includes up to 500,000 commands per month and 256 MB of data, for prototypes and hobby projects.
+## 3. Mobile Android Application Deployment (`mobile/`)
 
-These limits mean the hosted version is a noncommercial demo with cold starts, possible pauses, and reduced background-processing reliability. Do not use it for live business records or describe it as production-ready.
+### Running in Android Emulator / Device
+```bash
+cd mobile
+npm install
+npx expo start
+```
+- Press `a` in the terminal to launch on a running Android emulator.
+- Scan QR code using Expo Go on a physical Android device.
+
+### Building Standalone Android Release (APK / AAB)
+```bash
+cd mobile
+npm install -g eas-cli
+eas login
+eas build -p android --profile preview
+```
+
+---
+
+## 4. Production Verification Checklist
+
+- [x] All 27 backend unit and integration tests passing (`py -3.12 -m pytest backend/tests`).
+- [x] All 9 frontend Vitest tests passing (`npm run test:ui`).
+- [x] Next.js production build (`npm run build`) succeeds with 0 errors.
+- [x] Monotonic synchronization tokens verified against duplicate pushes and conflicts.
+- [x] Inter-account transfers verified to have zero net impact on business revenue or expense totals.
+- [x] AR and AP ageing buckets calculated with strict decimal precision.

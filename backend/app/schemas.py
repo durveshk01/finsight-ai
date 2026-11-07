@@ -46,7 +46,7 @@ class BusinessMemberRoleIn(BaseModel):
 
 
 class TransactionIn(BaseModel):
-    kind: Literal["income", "expense"]
+    kind: Literal["income", "expense", "transfer"]
     category: str = Field(min_length=2, max_length=80)
     amount: Decimal = Field(gt=0, max_digits=16, decimal_places=2)
     date: date
@@ -55,6 +55,7 @@ class TransactionIn(BaseModel):
     status: Literal["completed", "pending", "scheduled"] = "completed"
     reference: str | None = Field(default=None, max_length=100)
     account_id: int | None = None
+    to_account_id: int | None = None
 
     @field_validator("category")
     @classmethod
@@ -63,6 +64,31 @@ class TransactionIn(BaseModel):
         if len(cleaned) < 2:
             raise ValueError("category must contain at least two non-space characters")
         return cleaned
+
+
+class BulkTransactionIn(BaseModel):
+    action: Literal["delete", "update_category", "update_status"]
+    transaction_ids: list[int] = Field(min_length=1, max_length=500)
+    category: str | None = None
+    status: Literal["completed", "pending", "scheduled"] | None = None
+
+
+class SyncMutation(BaseModel):
+    client_mutation_id: str = Field(min_length=1, max_length=80)
+    entity_type: Literal["transaction", "account", "invoice", "recurring", "scenario", "category"]
+    action: Literal["create", "update", "delete"]
+    entity_id: int | None = None
+    data: dict = Field(default_factory=dict)
+    base_version: int | None = None
+
+
+class SyncPushIn(BaseModel):
+    mutations: list[SyncMutation] = Field(max_length=500)
+
+
+class SyncPullIn(BaseModel):
+    since_seq: int = Field(default=0, ge=0)
+    limit: int = Field(default=200, ge=1, le=1000)
 
 
 class TransactionOut(TransactionIn):

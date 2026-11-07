@@ -18,10 +18,10 @@ from .database import get_db
 from .forecasting import forecast_daily
 from .models import (Account, AuditLog, Business, BusinessMember, FinancialForecast, FinancialInsight, FinancialScenario,
                      ForecastJob, ForecastMetric, ForecastRun, Invoice, Notification, Payable, Payment, Receivable,
-                     RecurringTransaction, ReportRun, ScenarioAssumption, Transaction, TransactionCategory, User)
-from .schemas import (AccountIn, AuthIn, BusinessIn, BusinessMemberIn, BusinessMemberRoleIn, BusinessOut, CategoryIn,
+                     RecurringTransaction, ReportRun, ScenarioAssumption, SyncChange, Transaction, TransactionCategory, User)
+from .schemas import (AccountIn, AuthIn, BulkTransactionIn, BusinessIn, BusinessMemberIn, BusinessMemberRoleIn, BusinessOut, CategoryIn,
                       ForecastGenerateIn, InvoiceIn, InvoicePaymentIn,
-                      RecurringTransactionIn, RegisterIn, ReportIn, ScenarioIn, TransactionIn, TransactionOut, UserOut)
+                      RecurringTransactionIn, RegisterIn, ReportIn, ScenarioIn, SyncMutation, SyncPullIn, SyncPushIn, TransactionIn, TransactionOut, UserOut)
 from .security import create_token, current_user, hash_password, user_business, verify_password
 
 router = APIRouter(prefix="/api")
@@ -64,13 +64,14 @@ DEFAULT_CATEGORIES = {
 
 def _ensure_category(db: Session, business: Business, kind: str, name: str) -> TransactionCategory:
     cleaned = name.strip()
+    cat_kind = "expense" if kind == "transfer" else kind
     row = db.scalar(select(TransactionCategory).where(TransactionCategory.business_id == business.id,
-                                                       TransactionCategory.kind == kind,
+                                                       TransactionCategory.kind == cat_kind,
                                                        func.lower(TransactionCategory.name) == cleaned.lower()))
     if row:
         return row
-    row = TransactionCategory(business_id=business.id, kind=kind, name=cleaned,
-                              is_system=cleaned in DEFAULT_CATEGORIES[kind])
+    row = TransactionCategory(business_id=business.id, kind=cat_kind, name=cleaned,
+                              is_system=cleaned in DEFAULT_CATEGORIES.get(cat_kind, ()))
     db.add(row)
     db.flush()
     return row
@@ -127,13 +128,31 @@ def _serialize_transaction(t: Transaction) -> dict:
     return {"id": t.id, "business_id": t.business_id, "kind": t.kind, "category": t.category,
             "amount": float(t.amount), "date": t.date.isoformat(), "description": t.description,
             "payment_method": t.payment_method, "status": t.status, "reference": t.reference,
-            "account_id": t.account_id, "category_id": t.category_id,
+            "account_id": t.account_id, "to_account_id": getattr(t, "to_account_id", None),
+            "category_id": t.category_id,
             "created_at": t.created_at.isoformat() if t.created_at else None}
 
 
-def _audit(db: Session, user: User, business: Business, action: str, entity: str, entity_id: int | None, detail: dict) -> None:
+def _record_sync_change(db: Session, business: Business, entity_type: str, entity_id: int, action: str, detail: dict, client_mutation_id: str | None = None) -> SyncChange:
+    max_seq = db.scalar(select(func.coalesce(func.max(SyncChange.seq_num), 0)).where(SyncChange.business_id == business.id)) or 0
+    change = SyncChange(
+        business_id=business.id,
+        seq_num=max_seq + 1,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        action=action,
+        client_mutation_id=client_mutation_id,
+        data_json=json.dumps(detail, default=str),
+    )
+    db.add(change)
+    return change
+
+
+def _audit(db: Session, user: User, business: Business, action: str, entity: str, entity_id: int | None, detail: dict, client_mutation_id: str | None = None) -> None:
     db.add(AuditLog(business_id=business.id, user_id=user.id, action=action, entity=entity, entity_id=entity_id,
                     detail_json=json.dumps(detail, default=str)))
+    if entity_id is not None:
+        _record_sync_change(db, business, entity, entity_id, action, detail, client_mutation_id)
 
 
 def _next_occurrence(value: date, frequency: str) -> date:
@@ -158,7 +177,7 @@ def _monthly(db: Session, business: Business, months: int = 6, kind: str | None 
         cur = next_month
     for row in rows:
         key = row.date.strftime("%Y-%m")
-        if key in totals and (kind is None or row.kind == kind):
+        if key in totals and row.kind in totals[key] and (kind is None or row.kind == kind):
             totals[key][row.kind] += row.amount
     return [{"month": key, "revenue": float(v["income"]), "expenses": float(v["expense"]),
              "net_cash_flow": float(v["income"] - v["expense"])} for key, v in totals.items()]
@@ -218,7 +237,7 @@ def _persist_forecast(db: Session, business: Business, target: str, result: dict
 
 def _current_cash(db: Session, business: Business) -> Decimal:
     rows = _transactions(db, business, end=date.today())
-    net = sum((t.amount if t.kind == "income" else -t.amount for t in rows), Decimal("0"))
+    net = sum((t.amount if t.kind == "income" else (-t.amount if t.kind == "expense" else Decimal("0")) for t in rows), Decimal("0"))
     return _decimal(business.opening_cash + net)
 
 
@@ -567,13 +586,22 @@ def list_accounts(user: User = Depends(current_user), db: Session = Depends(get_
     accounts = db.scalars(select(Account).where(Account.business_id == business.id).order_by(Account.name)).all()
     results = []
     for account in accounts:
-        net = db.scalar(select(func.coalesce(func.sum(Transaction.amount * case(
-            (Transaction.kind == "income", 1), else_=-1)), 0)).where(
+        net_direct = db.scalar(select(func.coalesce(func.sum(Transaction.amount * case(
+            (Transaction.kind == "income", 1),
+            (Transaction.kind == "expense", -1),
+            else_=0)), 0)).where(
                 Transaction.business_id == business.id, Transaction.account_id == account.id,
                 Transaction.status == "completed")) or 0
+        transfers_in = db.scalar(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.business_id == business.id, Transaction.to_account_id == account.id,
+            Transaction.kind == "transfer", Transaction.status == "completed")) or 0
+        transfers_out = db.scalar(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.business_id == business.id, Transaction.account_id == account.id,
+            Transaction.kind == "transfer", Transaction.status == "completed")) or 0
+        current_bal = account.opening_balance + Decimal(str(net_direct)) + Decimal(str(transfers_in)) - Decimal(str(transfers_out))
         results.append({"id": account.id, "name": account.name, "account_type": account.account_type,
                         "currency": account.currency, "opening_balance": float(account.opening_balance),
-                        "current_balance": float(account.opening_balance + Decimal(str(net))),
+                        "current_balance": float(current_bal),
                         "is_active": account.is_active})
     return results
 
@@ -725,7 +753,7 @@ def list_transactions(user: User = Depends(current_user), db: Session = Depends(
                       sort: str = "date", direction: str = "desc", page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=200)):
     business = _business(user, db, x_business_id)
     stmt = select(Transaction).where(Transaction.business_id == business.id)
-    if kind in ("income", "expense"):
+    if kind in ("income", "expense", "transfer"):
         stmt = stmt.where(Transaction.kind == kind)
     if category:
         stmt = stmt.where(Transaction.category == category)
@@ -750,9 +778,14 @@ def create_transaction(payload: TransactionIn, user: User = Depends(current_user
     business = _business(user, db, x_business_id)
     _require_write_access(user, db, business)
     _owned_account(db, business, payload.account_id)
+    if payload.to_account_id is not None:
+        _owned_account(db, business, payload.to_account_id)
+    if payload.kind == "transfer":
+        if payload.account_id and payload.to_account_id and payload.account_id == payload.to_account_id:
+            raise HTTPException(422, "Transfer source and destination accounts must be different")
     category = _ensure_category(db, business, payload.kind, payload.category)
-    values = payload.model_dump(exclude={"account_id"})
-    row = Transaction(business_id=business.id, category_id=category.id, account_id=payload.account_id, **values)
+    values = payload.model_dump(exclude={"account_id", "to_account_id"})
+    row = Transaction(business_id=business.id, category_id=category.id, account_id=payload.account_id, to_account_id=payload.to_account_id, **values)
     db.add(row)
     db.flush()
     _audit(db, user, business, "create", "transaction", row.id, _serialize_transaction(row))
@@ -770,11 +803,17 @@ def update_transaction(transaction_id: int, payload: TransactionIn, user: User =
         raise HTTPException(404, "Transaction not found")
     before = _serialize_transaction(row)
     _owned_account(db, business, payload.account_id)
+    if payload.to_account_id is not None:
+        _owned_account(db, business, payload.to_account_id)
+    if payload.kind == "transfer":
+        if payload.account_id and payload.to_account_id and payload.account_id == payload.to_account_id:
+            raise HTTPException(422, "Transfer source and destination accounts must be different")
     category = _ensure_category(db, business, payload.kind, payload.category)
-    for key, value in payload.model_dump(exclude={"account_id"}).items():
+    for key, value in payload.model_dump(exclude={"account_id", "to_account_id"}).items():
         setattr(row, key, value)
     row.category_id = category.id
     row.account_id = payload.account_id
+    row.to_account_id = payload.to_account_id
     db.flush()
     _audit(db, user, business, "update", "transaction", row.id, {"before": before, "after": _serialize_transaction(row)})
     db.commit()
@@ -795,6 +834,48 @@ def delete_transaction(transaction_id: int, user: User = Depends(current_user), 
     db.delete(row)
     db.commit()
     return {"deleted": True}
+
+
+@router.post("/transactions/bulk")
+def bulk_transactions(payload: BulkTransactionIn, user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    _require_write_access(user, db, business)
+    rows = list(db.scalars(select(Transaction).where(Transaction.id.in_(payload.transaction_ids), Transaction.business_id == business.id)))
+    if payload.action == "delete":
+        payment_tx_ids = set(db.scalars(select(Payment.transaction_id).where(Payment.transaction_id.in_([r.id for r in rows]))))
+        deleted_count = 0
+        skipped = 0
+        for r in rows:
+            if r.id in payment_tx_ids:
+                skipped += 1
+                continue
+            _audit(db, user, business, "delete", "transaction", r.id, _serialize_transaction(r))
+            db.delete(r)
+            deleted_count += 1
+        db.commit()
+        return {"action": "delete", "affected": deleted_count, "skipped": skipped}
+    elif payload.action == "update_category":
+        if not payload.category:
+            raise HTTPException(422, "Category must be provided for update_category action")
+        updated_count = 0
+        for r in rows:
+            cat = _ensure_category(db, business, r.kind, payload.category)
+            r.category = cat.name
+            r.category_id = cat.id
+            _audit(db, user, business, "update", "transaction", r.id, _serialize_transaction(r))
+            updated_count += 1
+        db.commit()
+        return {"action": "update_category", "affected": updated_count}
+    elif payload.action == "update_status":
+        if not payload.status:
+            raise HTTPException(422, "Status must be provided for update_status action")
+        updated_count = 0
+        for r in rows:
+            r.status = payload.status
+            _audit(db, user, business, "update", "transaction", r.id, _serialize_transaction(r))
+            updated_count += 1
+        db.commit()
+        return {"action": "update_status", "affected": updated_count}
 
 
 @router.get("/recurring")
@@ -956,17 +1037,63 @@ def transaction_template_xlsx():
 
 
 @router.get("/analytics/overview")
-def overview(months: int = Query(6, ge=1, le=24), user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+def overview(months: int = Query(6, ge=1, le=36),
+             start: date | None = Query(None),
+             end: date | None = Query(None),
+             preset: str | None = Query(None),
+             user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
     business = _business(user, db, x_business_id)
     series = _monthly(db, business, months)
     all_rows = _transactions(db, business, end=date.today())
-    window_rows = all_rows[-999999:]
     now = date.today()
-    start = _month_start(months)
-    selected = [t for t in window_rows if t.date >= start]
+
+    if preset == "today":
+        period_start = now
+        period_end = now
+    elif preset == "last_7_days":
+        period_start = now - timedelta(days=6)
+        period_end = now
+    elif preset == "last_30_days":
+        period_start = now - timedelta(days=29)
+        period_end = now
+    elif preset == "this_month":
+        period_start = date(now.year, now.month, 1)
+        period_end = now
+    elif preset == "last_month":
+        prev_month_end = date(now.year, now.month, 1) - timedelta(days=1)
+        period_start = date(prev_month_end.year, prev_month_end.month, 1)
+        period_end = prev_month_end
+    elif preset == "this_quarter":
+        quarter_start_month = ((now.month - 1) // 3) * 3 + 1
+        period_start = date(now.year, quarter_start_month, 1)
+        period_end = now
+    elif preset == "this_year":
+        period_start = date(now.year, 1, 1)
+        period_end = now
+    elif start and end:
+        period_start = start
+        period_end = end
+    else:
+        period_start = _month_start(months)
+        period_end = now
+
+    selected = [t for t in all_rows if period_start <= t.date <= period_end]
     rev = sum((t.amount for t in selected if t.kind == "income"), Decimal("0"))
     exp = sum((t.amount for t in selected if t.kind == "expense"), Decimal("0"))
     cash = _current_cash(db, business)
+
+    period_days = max(1, (period_end - period_start).days + 1)
+    prior_end = period_start - timedelta(days=1)
+    prior_start = prior_end - timedelta(days=period_days - 1)
+    prior_selected = [t for t in all_rows if prior_start <= t.date <= prior_end]
+    prior_rev = sum((t.amount for t in prior_selected if t.kind == "income"), Decimal("0"))
+    prior_exp = sum((t.amount for t in prior_selected if t.kind == "expense"), Decimal("0"))
+    prior_net = prior_rev - prior_exp
+
+    period_rev_growth = float((rev / prior_rev - 1) * 100) if prior_rev else (100.0 if rev > 0 else 0.0)
+    period_exp_growth = float((exp / prior_exp - 1) * 100) if prior_exp else (100.0 if exp > 0 else 0.0)
+    period_net_growth = float((((rev - exp) - prior_net) / abs(prior_net)) * 100) if prior_net != 0 else None
+
     recent90 = [t for t in all_rows if t.date >= now - timedelta(days=90)]
     burn = (sum((t.amount for t in recent90 if t.kind == "expense"), Decimal("0")) - sum((t.amount for t in recent90 if t.kind == "income"), Decimal("0"))) / Decimal("90")
     runway = float(cash / burn) if burn > 0 else None
@@ -996,16 +1123,311 @@ def overview(months: int = Query(6, ge=1, le=24), user: User = Depends(current_u
     upcoming_items = [_serialize_transaction(row) for row in pending] + invoice_obligations
     return {"business": {"id": business.id, "name": business.name, "currency": business.currency, "is_demo": business.is_demo,
                           "minimum_reserve": str(business.minimum_reserve), "opening_cash": str(business.opening_cash)},
-        "period": {"months": months, "start": start.isoformat(), "end": now.isoformat()},
+        "period": {"months": months, "start": period_start.isoformat(), "end": period_end.isoformat(), "preset": preset},
         "kpis": {"revenue": float(rev), "expenses": float(exp), "net_cash_flow": float(rev-exp), "current_cash": float(cash),
                  "profit_margin_pct": None, "cash_margin_pct": float((rev-exp) / rev * 100) if rev else 0, "cash_runway_days": runway,
                  "monthly_revenue_growth_pct": growth, "monthly_expense_growth_pct": expenses_growth,
+                 "period_revenue_growth_pct": period_rev_growth, "period_expense_growth_pct": period_exp_growth,
+                 "period_net_growth_pct": period_net_growth, "previous_period_revenue": float(prior_rev),
+                 "previous_period_expenses": float(prior_exp), "previous_period_net_cash_flow": float(prior_net),
                  "expense_to_revenue_pct": float(exp / rev * 100) if rev else 0, "accounts_receivable": float(receivables),
                  "accounts_payable": float(payables), "working_capital": float(cash + receivables - payables),
                  "average_monthly_burn": float(max(Decimal("0"), burn) * Decimal("30"))},
         "monthly": series, "expense_categories": [{"category": k, "amount": float(v), "share_pct": float(v / exp * 100) if exp else 0} for k, v in sorted(categories.items(), key=lambda x: x[1], reverse=True)],
         "recent_transactions": [_serialize_transaction(t) for t in sorted(all_rows, key=lambda r: (r.date, r.id), reverse=True)[:8]],
         "upcoming_obligations": sorted(upcoming_items, key=lambda item: item["date"])[:8], "insights": _insights(db, business)}
+
+
+@router.get("/invoices/receivables/ageing")
+def receivables_ageing(user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    today = date.today()
+    invoices = db.scalars(
+        select(Invoice).where(Invoice.business_id == business.id, Invoice.direction == "receivable", Invoice.status != "paid")
+    ).all()
+    buckets = {"current": Decimal("0"), "days_1_30": Decimal("0"), "days_31_60": Decimal("0"), "days_61_90": Decimal("0"), "days_90_plus": Decimal("0")}
+    by_customer: dict[str, dict[str, Decimal | int]] = {}
+    total_due = Decimal("0")
+    total_overdue = Decimal("0")
+    for inv in invoices:
+        due = inv.amount - inv.amount_paid
+        if due <= 0:
+            continue
+        total_due += due
+        cust = inv.counterparty
+        if cust not in by_customer:
+            by_customer[cust] = {"customer": cust, "total_invoiced": Decimal("0"), "total_paid": Decimal("0"), "amount_due": Decimal("0"), "overdue_amount": Decimal("0"), "invoice_count": 0}
+        by_customer[cust]["total_invoiced"] += inv.amount
+        by_customer[cust]["total_paid"] += inv.amount_paid
+        by_customer[cust]["amount_due"] += due
+        by_customer[cust]["invoice_count"] += 1
+
+        days_past = (today - inv.due_date).days
+        if days_past <= 0:
+            buckets["current"] += due
+        else:
+            total_overdue += due
+            by_customer[cust]["overdue_amount"] += due
+            if days_past <= 30:
+                buckets["days_1_30"] += due
+            elif days_past <= 60:
+                buckets["days_31_60"] += due
+            elif days_past <= 90:
+                buckets["days_61_90"] += due
+            else:
+                buckets["days_90_plus"] += due
+
+    customers_list = [
+        {"customer": k, "total_invoiced": float(v["total_invoiced"]), "total_paid": float(v["total_paid"]),
+         "amount_due": float(v["amount_due"]), "overdue_amount": float(v["overdue_amount"]), "invoice_count": int(v["invoice_count"])}
+        for k, v in sorted(by_customer.items(), key=lambda item: item[1]["amount_due"], reverse=True)
+    ]
+    return {
+        "total_outstanding": float(total_due),
+        "total_overdue": float(total_overdue),
+        "buckets": {k: float(v) for k, v in buckets.items()},
+        "customers": customers_list,
+    }
+
+
+@router.get("/invoices/payables/ageing")
+def payables_ageing(user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    today = date.today()
+    invoices = db.scalars(
+        select(Invoice).where(Invoice.business_id == business.id, Invoice.direction == "payable", Invoice.status != "paid")
+    ).all()
+    buckets = {"current": Decimal("0"), "days_1_30": Decimal("0"), "days_31_60": Decimal("0"), "days_61_90": Decimal("0"), "days_90_plus": Decimal("0")}
+    by_supplier: dict[str, dict[str, Decimal | int]] = {}
+    total_due = Decimal("0")
+    total_overdue = Decimal("0")
+    for inv in invoices:
+        due = inv.amount - inv.amount_paid
+        if due <= 0:
+            continue
+        total_due += due
+        sup = inv.counterparty
+        if sup not in by_supplier:
+            by_supplier[sup] = {"supplier": sup, "total_billed": Decimal("0"), "total_paid": Decimal("0"), "amount_due": Decimal("0"), "overdue_amount": Decimal("0"), "bill_count": 0}
+        by_supplier[sup]["total_billed"] += inv.amount
+        by_supplier[sup]["total_paid"] += inv.amount_paid
+        by_supplier[sup]["amount_due"] += due
+        by_supplier[sup]["bill_count"] += 1
+
+        days_past = (today - inv.due_date).days
+        if days_past <= 0:
+            buckets["current"] += due
+        else:
+            total_overdue += due
+            by_supplier[sup]["overdue_amount"] += due
+            if days_past <= 30:
+                buckets["days_1_30"] += due
+            elif days_past <= 60:
+                buckets["days_31_60"] += due
+            elif days_past <= 90:
+                buckets["days_61_90"] += due
+            else:
+                buckets["days_90_plus"] += due
+
+    suppliers_list = [
+        {"supplier": k, "total_billed": float(v["total_billed"]), "total_paid": float(v["total_paid"]),
+         "amount_due": float(v["amount_due"]), "overdue_amount": float(v["overdue_amount"]), "bill_count": int(v["bill_count"])}
+        for k, v in sorted(by_supplier.items(), key=lambda item: item[1]["amount_due"], reverse=True)
+    ]
+    return {
+        "total_outstanding": float(total_due),
+        "total_overdue": float(total_overdue),
+        "buckets": {k: float(v) for k, v in buckets.items()},
+        "suppliers": suppliers_list,
+    }
+
+
+@router.post("/sync/pull")
+def sync_pull(payload: SyncPullIn, user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    latest_seq = db.scalar(select(func.coalesce(func.max(SyncChange.seq_num), 0)).where(SyncChange.business_id == business.id)) or 0
+    if payload.since_seq == 0:
+        txs = _transactions(db, business, statuses=("completed", "pending", "scheduled"))
+        accounts = db.scalars(select(Account).where(Account.business_id == business.id)).all()
+        categories = db.scalars(select(TransactionCategory).where(TransactionCategory.business_id == business.id)).all()
+        invoices = db.scalars(select(Invoice).where(Invoice.business_id == business.id)).all()
+        recurring = db.scalars(select(RecurringTransaction).where(RecurringTransaction.business_id == business.id)).all()
+        scenarios = db.scalars(select(FinancialScenario).where(FinancialScenario.business_id == business.id)).all()
+        return {
+            "mode": "baseline",
+            "latest_seq": latest_seq,
+            "has_more": False,
+            "server_time": datetime.now().isoformat(),
+            "data": {
+                "transactions": [_serialize_transaction(t) for t in txs],
+                "accounts": [{"id": a.id, "name": a.name, "account_type": a.account_type, "currency": a.currency, "opening_balance": float(a.opening_balance), "is_active": a.is_active} for a in accounts],
+                "categories": [{"id": c.id, "kind": c.kind, "name": c.name, "is_system": c.is_system} for c in categories],
+                "invoices": [_invoice_out(inv) for inv in invoices],
+                "recurring": [{"id": r.id, "kind": r.kind, "category": r.category, "amount": float(r.amount), "frequency": r.frequency, "next_date": r.next_date.isoformat(), "end_date": r.end_date.isoformat() if r.end_date else None, "description": r.description, "payment_method": r.payment_method, "enabled": r.enabled} for r in recurring],
+                "scenarios": [{"id": s.id, "name": s.name, "assumptions": json.loads(s.assumptions)} for s in scenarios],
+            }
+        }
+    stmt = (select(SyncChange)
+            .where(SyncChange.business_id == business.id, SyncChange.seq_num > payload.since_seq)
+            .order_by(SyncChange.seq_num.asc())
+            .limit(payload.limit + 1))
+    changes = list(db.scalars(stmt))
+    has_more = len(changes) > payload.limit
+    items = changes[:payload.limit]
+    new_seq = items[-1].seq_num if items else payload.since_seq
+    return {
+        "mode": "delta",
+        "latest_seq": latest_seq,
+        "has_more": has_more,
+        "new_seq": new_seq,
+        "server_time": datetime.now().isoformat(),
+        "changes": [
+            {
+                "id": c.id,
+                "seq_num": c.seq_num,
+                "entity_type": c.entity_type,
+                "entity_id": c.entity_id,
+                "action": c.action,
+                "client_mutation_id": c.client_mutation_id,
+                "data": json.loads(c.data_json) if c.data_json else {},
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in items
+        ]
+    }
+
+
+@router.post("/sync/push")
+def sync_push(payload: SyncPushIn, user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    _require_write_access(user, db, business)
+    applied = []
+    conflicts = []
+    for mutation in payload.mutations:
+        existing_change = db.scalar(
+            select(SyncChange).where(
+                SyncChange.business_id == business.id,
+                SyncChange.client_mutation_id == mutation.client_mutation_id,
+            )
+        )
+        if existing_change:
+            applied.append({
+                "client_mutation_id": mutation.client_mutation_id,
+                "status": "already_applied",
+                "entity_id": existing_change.entity_id,
+                "seq_num": existing_change.seq_num,
+            })
+            continue
+
+        try:
+            if mutation.entity_type == "transaction":
+                if mutation.action == "create":
+                    cat = _ensure_category(db, business, mutation.data.get("kind", "expense"), mutation.data.get("category", "Other Expenses"))
+                    row = Transaction(
+                        business_id=business.id,
+                        category_id=cat.id,
+                        account_id=mutation.data.get("account_id"),
+                        to_account_id=mutation.data.get("to_account_id"),
+                        kind=mutation.data.get("kind", "expense"),
+                        category=cat.name,
+                        amount=_decimal(mutation.data.get("amount", 0)),
+                        date=date.fromisoformat(mutation.data.get("date", date.today().isoformat())),
+                        description=str(mutation.data.get("description", "")),
+                        payment_method=str(mutation.data.get("payment_method", "Bank transfer")),
+                        status=str(mutation.data.get("status", "completed")),
+                        reference=mutation.data.get("reference"),
+                    )
+                    db.add(row)
+                    db.flush()
+                    _audit(db, user, business, "create", "transaction", row.id, _serialize_transaction(row), mutation.client_mutation_id)
+                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "created", "entity_id": row.id})
+                elif mutation.action == "update":
+                    row = db.scalar(select(Transaction).where(Transaction.id == mutation.entity_id, Transaction.business_id == business.id))
+                    if not row:
+                        conflicts.append({"client_mutation_id": mutation.client_mutation_id, "error": "Transaction not found"})
+                        continue
+                    if "amount" in mutation.data:
+                        row.amount = _decimal(mutation.data["amount"])
+                    if "description" in mutation.data:
+                        row.description = str(mutation.data["description"])
+                    if "status" in mutation.data:
+                        row.status = str(mutation.data["status"])
+                    if "category" in mutation.data:
+                        cat = _ensure_category(db, business, row.kind, mutation.data["category"])
+                        row.category = cat.name
+                        row.category_id = cat.id
+                    if "account_id" in mutation.data:
+                        row.account_id = mutation.data["account_id"]
+                    if "to_account_id" in mutation.data:
+                        row.to_account_id = mutation.data["to_account_id"]
+                    db.flush()
+                    _audit(db, user, business, "update", "transaction", row.id, _serialize_transaction(row), mutation.client_mutation_id)
+                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "updated", "entity_id": row.id})
+                elif mutation.action == "delete":
+                    row = db.scalar(select(Transaction).where(Transaction.id == mutation.entity_id, Transaction.business_id == business.id))
+                    if row:
+                        db.delete(row)
+                        db.flush()
+                        _audit(db, user, business, "delete", "transaction", mutation.entity_id, {"id": mutation.entity_id}, mutation.client_mutation_id)
+                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "deleted", "entity_id": mutation.entity_id})
+            elif mutation.entity_type == "invoice":
+                if mutation.action == "create":
+                    inv_direction = mutation.data.get("direction", "receivable")
+                    inv_category = mutation.data.get("category") or ("Sales Revenue" if inv_direction == "receivable" else "Other Expenses")
+                    row = Invoice(
+                        business_id=business.id,
+                        direction=inv_direction,
+                        invoice_number=str(mutation.data.get("invoice_number", f"INV-{int(datetime.now().timestamp())}")),
+                        counterparty=str(mutation.data.get("counterparty", "Client")),
+                        issue_date=date.fromisoformat(mutation.data.get("issue_date", date.today().isoformat())),
+                        due_date=date.fromisoformat(mutation.data.get("due_date", (date.today() + timedelta(days=30)).isoformat())),
+                        amount=_decimal(mutation.data.get("amount", 0)),
+                        amount_paid=_decimal(mutation.data.get("amount_paid", 0)),
+                        currency=str(mutation.data.get("currency", business.currency)).upper(),
+                        category=inv_category,
+                        account_id=mutation.data.get("account_id"),
+                        description=str(mutation.data.get("description", "")),
+                        status="paid" if _decimal(mutation.data.get("amount_paid", 0)) >= _decimal(mutation.data.get("amount", 0)) else "open"
+                    )
+                    db.add(row)
+                    db.flush()
+                    _audit(db, user, business, "create", "invoice", row.id, _invoice_out(row), mutation.client_mutation_id)
+                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "created", "entity_id": row.id})
+            elif mutation.entity_type == "account":
+                if mutation.action == "create":
+                    acc = Account(
+                        business_id=business.id,
+                        name=mutation.data.get("name", "Account").strip(),
+                        account_type=mutation.data.get("account_type", "bank"),
+                        currency=str(mutation.data.get("currency", business.currency)).upper(),
+                        opening_balance=_decimal(mutation.data.get("opening_balance", 0)),
+                    )
+                    db.add(acc)
+                    db.flush()
+                    _audit(db, user, business, "create", "account", acc.id, {"name": acc.name, "currency": acc.currency}, mutation.client_mutation_id)
+                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "created", "entity_id": acc.id})
+        except Exception as e:
+            conflicts.append({"client_mutation_id": mutation.client_mutation_id, "error": str(e)})
+
+    db.commit()
+    latest_seq = db.scalar(select(func.coalesce(func.max(SyncChange.seq_num), 0)).where(SyncChange.business_id == business.id)) or 0
+    return {"applied": applied, "conflicts": conflicts, "latest_seq": latest_seq}
+
+
+@router.get("/sync/status")
+def sync_status(user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    latest_seq = db.scalar(select(func.coalesce(func.max(SyncChange.seq_num), 0)).where(SyncChange.business_id == business.id)) or 0
+    tx_count = db.scalar(select(func.count(Transaction.id)).where(Transaction.business_id == business.id)) or 0
+    inv_count = db.scalar(select(func.count(Invoice.id)).where(Invoice.business_id == business.id)) or 0
+    return {
+        "business_id": business.id,
+        "business_name": business.name,
+        "latest_seq": latest_seq,
+        "transactions_count": tx_count,
+        "invoices_count": inv_count,
+        "server_time": datetime.now().isoformat(),
+    }
 
 
 @router.get("/analytics/revenue")

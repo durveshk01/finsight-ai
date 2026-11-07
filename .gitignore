@@ -23,3 +23,5 @@ backend/.coverage
 backend/htmlcov/
 .DS_Store
 Thumbs.db
+.qwen/
+.expo/

@@ -9,16 +9,25 @@ import {
   Check, ChevronDown, CircleDollarSign, Clock3, Download, FileText, Gauge,
   LayoutDashboard, Lightbulb, LogOut, Menu, Moon, MoreHorizontal, Pencil,
   Plus, Search, Settings, ShieldAlert, SlidersHorizontal, Sparkles, Sun,
-  Trash2, Upload, Wallet, X, ChevronLeft, ChevronRight, type LucideIcon,
+  Trash2, Upload, Wallet, X, ChevronLeft, ChevronRight, RefreshCw, CheckSquare,
+  Square, Globe, Printer, type LucideIcon,
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend,
   Line, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { Button, CardTitle, Field, inputClass } from "@/components/ui";
+import { LandingPage } from "@/components/landing-page";
+import { DashboardCharts } from "@/components/dashboard-charts";
+import { InvoicesManager, AccountOption } from "@/components/invoices-manager";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-const categories = ["Sales Revenue", "Service Revenue", "Interest Income", "Investment Income", "Other Income", "Salaries", "Rent", "Utilities", "Marketing", "Inventory", "Transportation", "Software Subscriptions", "Taxes", "Loan Repayments", "Maintenance", "Other Expenses"];
+const categories = [
+  "Sales Revenue", "Service Revenue", "Interest Income", "Investment Income", "Other Income",
+  "Salaries", "Rent", "Utilities", "Marketing", "Inventory", "Transportation",
+  "Software Subscriptions", "Taxes", "Loan Repayments", "Maintenance", "Other Expenses",
+  "Inter-account Transfer"
+];
 const navSections: { title: string; items: { id: string; label: string; icon: LucideIcon }[] }[] = [
   { title: "WORKSPACE", items: [{ id: "overview", label: "Overview", icon: LayoutDashboard }, { id: "transactions", label: "Transactions", icon: CircleDollarSign }, { id: "revenue", label: "Revenue analytics", icon: Activity }, { id: "expenses", label: "Expense analytics", icon: SlidersHorizontal }, { id: "cashflow", label: "Cash flow", icon: Wallet }] },
   { title: "INTELLIGENCE", items: [{ id: "forecast", label: "AI forecasting", icon: Sparkles }, { id: "risk", label: "Risk analysis", icon: ShieldAlert }, { id: "simulator", label: "What-if simulator", icon: Gauge }, { id: "insights", label: "Business insights", icon: Lightbulb }] },
@@ -27,8 +36,29 @@ const navSections: { title: string; items: { id: string; label: string; icon: Lu
 
 type Business = { id: number; name: string; currency: string; opening_cash: string; minimum_reserve: string; is_demo: boolean };
 type User = { id: number; name: string; email: string };
-type Transaction = { id: number; kind: "income" | "expense"; category: string; amount: number; date: string; description: string; payment_method: string; status: string; reference?: string };
-type Overview = { business: { id: number; name: string; currency: string; is_demo: boolean; opening_cash: string; minimum_reserve: string }; period: { months: number; start: string; end: string }; kpis: Record<string, number | null>; monthly: { month: string; revenue: number; expenses: number; net_cash_flow: number }[]; expense_categories: { category: string; amount: number; share_pct: number }[]; recent_transactions: Transaction[]; upcoming_obligations: Transaction[]; insights: Insight[] };
+type Transaction = {
+  id: number;
+  kind: "income" | "expense" | "transfer";
+  category: string;
+  amount: number;
+  date: string;
+  description: string;
+  payment_method: string;
+  status: string;
+  reference?: string;
+  account_id?: number | null;
+  to_account_id?: number | null;
+};
+type Overview = {
+  business: { id: number; name: string; currency: string; is_demo: boolean; opening_cash: string; minimum_reserve: string };
+  period: { months: number; start: string; end: string };
+  kpis: Record<string, number | null>;
+  monthly: { month: string; revenue: number; expenses: number; net_cash_flow: number }[];
+  expense_categories: { category: string; amount: number; share_pct: number }[];
+  recent_transactions: Transaction[];
+  upcoming_obligations: Transaction[];
+  insights: Insight[];
+};
 type Insight = { title: string; description: string; supporting_figures: Record<string, unknown>; period: string; severity: string; recommended_action: string; reference: string };
 type Forecast = { selected_model: string; status?: string; training_start: string | null; training_end: string | null; metrics: { model: string; mae: number; rmse: number; mape: number | null; wape: number | null; selected: boolean }[]; predictions: { date: string; value: number; lower: number; upper: number }[] };
 type CashDay = { date: string; inflows: number; outflows: number; balance: number; lower_balance: number; upper_balance: number };
@@ -46,19 +76,36 @@ type Invoice = { id: number; direction: "receivable" | "payable"; invoice_number
 type WorkspaceMember = { id: number; user_id: number; name: string; email: string; role: "owner" | "admin" | "accountant" | "viewer" };
 
 const transactionSchema = z.object({
-  kind: z.enum(["income", "expense"]), category: z.string().min(2, "Choose a category"),
-  amount: z.coerce.number().positive("Enter an amount greater than zero"), date: z.string().min(1),
-  description: z.string().max(240), payment_method: z.string().min(1), status: z.enum(["completed", "pending", "scheduled"]),
+  kind: z.enum(["income", "expense", "transfer"]),
+  category: z.string().min(2, "Choose a category"),
+  amount: z.coerce.number().positive("Enter an amount greater than zero"),
+  date: z.string().min(1),
+  description: z.string().max(240),
+  payment_method: z.string().min(1),
+  status: z.enum(["completed", "pending", "scheduled"]),
+  account_id: z.coerce.number().optional().nullable(),
+  to_account_id: z.coerce.number().optional().nullable(),
 });
 type TransactionForm = z.infer<typeof transactionSchema>;
 
 function currency(value: number | null | undefined, code = "INR", compact = false) {
   const amount = Number(value ?? 0);
-  return new Intl.NumberFormat("en-IN", { style: "currency", currency: code, maximumFractionDigits: compact ? 0 : 2, notation: compact && Math.abs(amount) >= 100000 ? "compact" : "standard" }).format(Number.isFinite(amount) ? amount : 0);
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: code,
+    maximumFractionDigits: compact ? 0 : 2,
+    notation: compact && Math.abs(amount) >= 100000 ? "compact" : "standard"
+  }).format(Number.isFinite(amount) ? amount : 0);
 }
-function fmtDate(value?: string) { return value ? new Date(value + (value.length === 10 ? "T00:00:00" : "")).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—"; }
-function monthLabel(value: string) { return new Date(value + "-01T00:00:00").toLocaleDateString("en-IN", { month: "short", year: "2-digit" }); }
-function messageFrom(error: unknown) { return error instanceof Error ? error.message : "Something went wrong. Try again."; }
+function fmtDate(value?: string) {
+  return value ? new Date(value + (value.length === 10 ? "T00:00:00" : "")).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—";
+}
+function monthLabel(value: string) {
+  return new Date(value + "-01T00:00:00").toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+}
+function messageFrom(error: unknown) {
+  return error instanceof Error ? error.message : "Something went wrong. Try again.";
+}
 
 async function readResponse(response: Response) {
   if (!response.ok) {
@@ -94,9 +141,11 @@ export default function Dashboard() {
   const [insights, setInsights] = useState<Insight[]>([]);
   const [notifications, setNotifications] = useState<{ id: number; title: string; message: string; severity: string; is_read: boolean; created_at: string }[]>([]);
   const [revenueSeries, setRevenueSeries] = useState<{ month: string; revenue: number }[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [period, setPeriod] = useState(6);
+  const [presetFilter, setPresetFilter] = useState("all");
   const [horizon, setHorizon] = useState(90);
   const [search, setSearch] = useState("");
   const [kindFilter, setKindFilter] = useState("");
@@ -108,10 +157,13 @@ export default function Dashboard() {
   const [scenarioInput, setScenarioInput] = useState<ScenarioInput>({ revenue_change_pct: 10, expense_change_pct: 0, one_time_cost: 0, new_monthly_revenue: 0, marketing_reduction_pct: 0, salary_increase_pct: 0, inventory_increase_pct: 0, new_hire_monthly_cost: 0, campaign_monthly_cost: 0, additional_loan_payment: 0, loan_proceeds: 0, capital_investment: 0, horizon_months: 6 });
   const [scenarioResult, setScenarioResult] = useState<Scenario | null>(null);
   const [settingsForm, setSettingsForm] = useState({ name: "", currency: "INR", minimum_reserve: "", opening_cash: "" });
+  const [showLanding, setShowLanding] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<{ lastSeq: number; pendingCount: number } | null>(null);
 
   const business = businesses.find((item) => item.id === businessId) ?? businesses[0];
   const code = business?.currency ?? "INR";
   const unread = notifications.filter((item) => !item.is_read).length;
+
   const api = useCallback(async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
     if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -151,17 +203,43 @@ export default function Dashboard() {
 
   useEffect(() => { const timer = window.setTimeout(() => { void loadWorkspace(); }, 0); return () => window.clearTimeout(timer); }, [loadWorkspace]);
 
+  const loadAccounts = useCallback(async () => {
+    if (!token || !businessId) return;
+    try {
+      const accts = await api("/api/accounts") as Account[];
+      setAccounts(accts);
+    } catch {
+      // ignore
+    }
+  }, [api, businessId, token]);
+
+  const loadSyncStatus = useCallback(async () => {
+    if (!token || !businessId) return;
+    try {
+      const st = await api("/api/sync/status") as { last_seq: number };
+      setSyncStatus({ lastSeq: st.last_seq || 0, pendingCount: 0 });
+    } catch {
+      // ignore
+    }
+  }, [api, businessId, token]);
+
   const loadOverview = useCallback(async () => {
     if (!token || !businessId) return;
     setLoading(true); setError("");
     try {
-      const result = await api(`/api/analytics/overview?months=${period}`) as Overview;
+      let url = `/api/analytics/overview?months=${period}`;
+      if (presetFilter && presetFilter !== "all") {
+        url += `&preset=${presetFilter}`;
+      }
+      const result = await api(url) as Overview;
       setOverview(result);
       setInsights(result.insights ?? []);
       setSettingsForm({ name: result.business.name, currency: result.business.currency, minimum_reserve: result.business.minimum_reserve, opening_cash: result.business.opening_cash });
+      void loadSyncStatus();
+      void loadAccounts();
     } catch (e) { setError(messageFrom(e)); }
     finally { setLoading(false); }
-  }, [api, businessId, period, token]);
+  }, [api, businessId, period, presetFilter, token, loadSyncStatus, loadAccounts]);
 
   useEffect(() => { const timer = window.setTimeout(() => { void loadOverview(); }, 0); return () => window.clearTimeout(timer); }, [loadOverview]);
 
@@ -204,10 +282,13 @@ export default function Dashboard() {
         if (active === "simulator") {
           const result = await api("/api/scenarios/compare") as { scenarios: Scenario[] }; setScenarios(result.scenarios);
         }
+        if (active === "accounts") {
+          await loadAccounts();
+        }
       } catch (e) { setError(messageFrom(e)); }
     };
     void load();
-  }, [active, api, businessId, horizon, loadNotifications, token]);
+  }, [active, api, businessId, horizon, loadNotifications, token, loadAccounts]);
 
   const handleLogin = async (email: string, password: string) => {
     setLoading(true); setError("");
@@ -245,7 +326,30 @@ export default function Dashboard() {
 
   const activeTitle = navSections.flatMap((section) => section.items).find((item) => item.id === active)?.label ?? "Overview";
 
-  if (!token) return <LoginScreen onLogin={handleLogin} onRegister={handleRegister} loading={loading} error={error} />;
+  if (showLanding) {
+    return (
+      <LandingPage
+        onLaunchApp={() => setShowLanding(false)}
+        onExploreDemo={() => {
+          setShowLanding(false);
+          void handleLogin("demo@finsight.ai", "Demo1234!");
+        }}
+        onOpenLogin={() => setShowLanding(false)}
+      />
+    );
+  }
+
+  if (!token) {
+    return (
+      <LoginScreen
+        onLogin={handleLogin}
+        onRegister={handleRegister}
+        onShowLanding={() => setShowLanding(true)}
+        loading={loading}
+        error={error}
+      />
+    );
+  }
 
   return <div className={`min-h-screen bg-[var(--background)] text-[var(--foreground)] ${theme === "dark" ? "dark" : ""}`}>
     {mobileMenu && <button aria-label="Close navigation" onClick={() => setMobileMenu(false)} className="fixed inset-0 z-30 bg-black/30 lg:hidden" />}
@@ -269,6 +373,15 @@ export default function Dashboard() {
           <div className="mb-2 px-3 text-[10px] font-bold tracking-[.14em] text-[#9aa79f]">{section.title}</div>
           <div className="grid gap-1">{section.items.map((item) => { const Icon = item.icon; const selected = item.id === active; return <button key={item.id} onClick={() => { setActive(item.id); setMobileMenu(false); setError(""); }} className={`flex h-10 items-center gap-3 rounded-lg px-3 text-left text-[13px] font-medium transition ${selected ? "bg-[#edf6f0] text-[#146747] dark:bg-[#233b2e] dark:text-[#a5d3b5]" : "text-[#67756d] hover:bg-[var(--background)] hover:text-[var(--foreground)]"}`}><Icon size={17} strokeWidth={selected ? 2.2 : 1.8} />{item.label}{item.id === "notifications" && unread > 0 && <span className="ml-auto rounded-full bg-[#e95145] px-1.5 py-0.5 text-[10px] font-bold text-white">{unread}</span>}</button>; })}</div>
         </div>)}
+
+        <div className="mb-3 px-3">
+          <button
+            onClick={() => setShowLanding(true)}
+            className="flex h-9 w-full items-center gap-2 rounded-lg border border-dashed border-[#a3c9b4] bg-[#f4faf6] px-3 text-left text-xs font-semibold text-[#167654] transition hover:bg-[#eaf4ee] dark:bg-[#1f362a] dark:text-[#88d2a8]"
+          >
+            <Globe size={14} /> Product Showcase
+          </button>
+        </div>
       </nav>
       {business?.is_demo && <div className="mx-4 mb-3 rounded-xl border border-[#dbece1] bg-[#f3faf5] p-3 dark:bg-[#1e3227]"><div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#347456]"><Sparkles size={13} /> Sample workspace</div><p className="mt-1.5 text-[10px] leading-4 text-[#6d8175]">Synthetic demo activity. Your own records stay separate in your workspace.</p></div>}
       <div className="border-t border-[var(--line)] p-4">
@@ -280,7 +393,45 @@ export default function Dashboard() {
       <header className="sticky top-0 z-20 flex h-[76px] items-center justify-between border-b border-[var(--line)] bg-[var(--surface)]/95 px-4 backdrop-blur sm:px-7 lg:px-9">
         <div className="flex items-center gap-3"><button onClick={() => setMobileMenu(true)} className="rounded-md p-1.5 text-[var(--muted)] lg:hidden" aria-label="Open navigation"><Menu size={19} /></button><div><div className="text-[15px] font-semibold tracking-[-.02em]">{activeTitle}</div><div className="mt-0.5 text-[11px] text-[var(--muted)]">{business?.name ?? "Your workspace"} <span className="px-1">·</span>{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</div></div></div>
         <div className="flex items-center gap-2 sm:gap-3">
-          {active === "overview" && <select value={period} onChange={(e) => setPeriod(Number(e.target.value))} aria-label="Reporting period" className="hidden rounded-lg border border-[var(--line)] bg-[var(--surface)] px-2.5 py-2 text-xs font-medium sm:block"><option value={3}>Last 3 months</option><option value={6}>Last 6 months</option><option value={12}>Last 12 months</option><option value={24}>Last 24 months</option></select>}
+          {/* Cloud Sync Status Indicator */}
+          <div
+            title={`Monotonic seq token #${syncStatus?.lastSeq || 0} - Connected to Render PostgreSQL`}
+            className="hidden items-center gap-1.5 rounded-full border border-[#d5e7dc] bg-[#f2f8f4] px-2.5 py-1 text-[11px] font-semibold text-[#167654] dark:border-[#274836] dark:bg-[#193325] dark:text-[#88d2a8] sm:flex"
+          >
+            <span className="h-2 w-2 rounded-full bg-[#10b981] animate-pulse" />
+            <span>Render Cloud Synced</span>
+          </div>
+
+          {active === "overview" && (
+            <div className="hidden items-center gap-1.5 sm:flex">
+              <select
+                value={presetFilter}
+                onChange={(e) => setPresetFilter(e.target.value)}
+                aria-label="Preset date filter"
+                className="rounded-lg border border-[var(--line)] bg-[var(--surface)] px-2.5 py-2 text-xs font-medium"
+              >
+                <option value="all">All recorded time</option>
+                <option value="today">Today</option>
+                <option value="last_7_days">Last 7 days</option>
+                <option value="last_30_days">Last 30 days</option>
+                <option value="this_month">This month</option>
+                <option value="last_month">Last month</option>
+                <option value="this_quarter">This quarter</option>
+                <option value="this_year">This year</option>
+              </select>
+              <select
+                value={period}
+                onChange={(e) => setPeriod(Number(e.target.value))}
+                aria-label="Reporting period"
+                className="rounded-lg border border-[var(--line)] bg-[var(--surface)] px-2 py-2 text-xs font-medium"
+              >
+                <option value={3}>3 mo</option>
+                <option value={6}>6 mo</option>
+                <option value={12}>12 mo</option>
+                <option value={24}>24 mo</option>
+              </select>
+            </div>
+          )}
           <button onClick={toggleTheme} title="Toggle theme" className="rounded-lg border border-[var(--line)] p-2 text-[var(--muted)] hover:bg-[var(--background)]">{theme === "light" ? <Moon size={16} /> : <Sun size={16} />}</button>
           <button onClick={() => { setActive("notifications"); void loadNotifications(); }} aria-label="Notifications" className="relative rounded-lg border border-[var(--line)] p-2 text-[var(--muted)] hover:bg-[var(--background)]"><Bell size={16} />{unread > 0 && <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full border-2 border-[var(--surface)] bg-[#e95145]" />}</button>
           <Button onClick={startAdd} className="hidden sm:inline-flex"><Plus size={15} />Add transaction</Button>
@@ -290,8 +441,8 @@ export default function Dashboard() {
       <main className="mx-auto max-w-[1510px] px-4 py-6 sm:px-7 sm:py-8 lg:px-9">
         {error && <div role="alert" className="mb-5 flex items-start gap-2 rounded-lg border border-[#f3ccc7] bg-[#fff3f1] px-4 py-3 text-[13px] text-[#a44237]"><ShieldAlert size={16} className="mt-0.5 shrink-0" />{error}<button className="ml-auto" onClick={() => setError("")} aria-label="Dismiss error"><X size={15} /></button></div>}
         {loading && !overview && <div className="mb-5 flex items-center gap-2 text-xs text-[var(--muted)]"><span className="h-2 w-2 animate-pulse rounded-full bg-[#147354]" />Loading your financial workspace…</div>}
-        {active === "overview" && <OverviewPage overview={overview} loading={loading} transactions={transactions.slice(0, 5)} code={code} onNavigate={setActive} onAdd={startAdd} />}
-        {active === "transactions" && <TransactionsPage rows={transactions} total={transactionTotal} page={transactionPage} pages={transactionPages} setPage={setTransactionPage} search={search} setSearch={(v) => { setSearch(v); setTransactionPage(1); }} kindFilter={kindFilter} setKindFilter={(v) => { setKindFilter(v); setTransactionPage(1); }} categoryFilter={categoryFilter} setCategoryFilter={(v) => { setCategoryFilter(v); setTransactionPage(1); }} dateStart={dateStart} setDateStart={(v) => { setDateStart(v); setTransactionPage(1); }} dateEnd={dateEnd} setDateEnd={(v) => { setDateEnd(v); setTransactionPage(1); }} sort={sort} setSort={(v) => { setSort(v); setTransactionPage(1); }} direction={direction} setDirection={(v) => { setDirection(v); setTransactionPage(1); }} onAdd={startAdd} onEdit={startEdit} onDelete={deleteTransaction} onUpload={async (file) => { const form = new FormData(); form.append("file", file); try { setImportPreview(await api("/api/transactions/import/preview", { method: "POST", body: form }) as ImportPreview); } catch (e) { setError(messageFrom(e)); } }} onRemap={async (file, mapping) => { const form = new FormData(); form.append("file", file); form.append("mapping", JSON.stringify(mapping)); try { setImportPreview(await api("/api/transactions/import/preview", { method: "POST", body: form }) as ImportPreview); } catch (e) { setError(messageFrom(e)); } }} importPreview={importPreview} setImportPreview={setImportPreview} confirmImport={async () => { if (!importPreview) return null; try { const result = await api("/api/transactions/import/confirm", { method: "POST", body: JSON.stringify({ rows: importPreview.rows }) }) as ImportResult; setImportPreview(null); await Promise.all([loadTransactions(), loadOverview()]); return result; } catch (e) { setError(messageFrom(e)); return null; } }} code={code} />}
+        {active === "overview" && <OverviewPage overview={overview} loading={loading} transactions={transactions.slice(0, 5)} code={code} onNavigate={setActive} onAdd={startAdd} cashflow={cashflow} />}
+        {active === "transactions" && <TransactionsPage rows={transactions} total={transactionTotal} page={transactionPage} pages={transactionPages} setPage={setTransactionPage} search={search} setSearch={(v) => { setSearch(v); setTransactionPage(1); }} kindFilter={kindFilter} setKindFilter={(v) => { setKindFilter(v); setTransactionPage(1); }} categoryFilter={categoryFilter} setCategoryFilter={(v) => { setCategoryFilter(v); setTransactionPage(1); }} dateStart={dateStart} setDateStart={(v) => { setDateStart(v); setTransactionPage(1); }} dateEnd={dateEnd} setDateEnd={(v) => { setDateEnd(v); setTransactionPage(1); }} sort={sort} setSort={(v) => { setSort(v); setTransactionPage(1); }} direction={direction} setDirection={(v) => { setDirection(v); setTransactionPage(1); }} onAdd={startAdd} onEdit={startEdit} onDelete={deleteTransaction} onUpload={async (file) => { const form = new FormData(); form.append("file", file); try { setImportPreview(await api("/api/transactions/import/preview", { method: "POST", body: form }) as ImportPreview); } catch (e) { setError(messageFrom(e)); } }} onRemap={async (file, mapping) => { const form = new FormData(); form.append("file", file); form.append("mapping", JSON.stringify(mapping)); try { setImportPreview(await api("/api/transactions/import/preview", { method: "POST", body: form }) as ImportPreview); } catch (e) { setError(messageFrom(e)); } }} importPreview={importPreview} setImportPreview={setImportPreview} confirmImport={async () => { if (!importPreview) return null; try { const result = await api("/api/transactions/import/confirm", { method: "POST", body: JSON.stringify({ rows: importPreview.rows }) }) as ImportResult; setImportPreview(null); await Promise.all([loadTransactions(), loadOverview()]); return result; } catch (e) { setError(messageFrom(e)); return null; } }} code={code} api={api} onRefresh={refreshAll} />}
         {active === "revenue" && <RevenuePage series={revenueSeries} forecast={forecast} horizon={horizon} setHorizon={setHorizon} code={code} />}
         {active === "expenses" && <ExpensesPage overview={overview} forecasts={expenseForecasts} horizon={horizon} setHorizon={setHorizon} code={code} />}
         {active === "cashflow" && <CashflowPage cashflow={cashflow} horizon={horizon} setHorizon={setHorizon} code={code} />}
@@ -299,7 +450,7 @@ export default function Dashboard() {
         {active === "risk" && <RiskPage risk={riskSnapshot} />}
         {active === "simulator" && <SimulatorPage input={scenarioInput} setInput={setScenarioInput} scenarios={scenarios} result={scenarioResult} setResult={setScenarioResult} code={code} api={api} onRefresh={async () => { const result = await api("/api/scenarios/compare") as { scenarios: Scenario[] }; setScenarios(result.scenarios); }} />}
         {active === "insights" && <InsightsPage insights={insights} onGenerate={async () => { try { const result = await api("/api/insights/generate", { method: "POST" }) as { insights: Insight[] }; setInsights(result.insights); await loadNotifications(); } catch (e) { setError(messageFrom(e)); } }} />}
-        {active === "accounts" && <AccountsInvoicesPage code={code} api={api} onRefresh={() => { void loadOverview(); }} />}
+        {active === "accounts" && <AccountsInvoicesPage code={code} api={api} accounts={accounts} onRefresh={() => { void loadOverview(); void loadAccounts(); }} />}
         {active === "recurring" && <RecurringPage items={recurringItems} setItems={setRecurringItems} code={code} api={api} />}
         {active === "reports" && <ReportsPage code={code} api={api} />}
         {active === "notifications" && <NotificationsPage items={notifications} onRefresh={loadNotifications} onRead={async (id) => { try { await api(`/api/notifications/${id}/read`, { method: "PATCH" }); await loadNotifications(); } catch (e) { setError(messageFrom(e)); } }} />}
@@ -308,12 +459,12 @@ export default function Dashboard() {
       <footer className="mx-auto flex max-w-[1510px] items-center justify-between px-4 pb-6 text-[10px] text-[var(--muted)] sm:px-7 lg:px-9"><span>FinSight AI · Financial intelligence for growing businesses</span><span>Forecasts are estimates based on available transaction history</span></footer>
     </div>
 
-    <TransactionModal open={modalOpen} onClose={() => setModalOpen(false)} editingId={editing} rows={transactions} api={api} onSaved={async () => { setModalOpen(false); await refreshAll(); }} onError={setError} />
+    <TransactionModal open={modalOpen} onClose={() => setModalOpen(false)} editingId={editing} rows={transactions} accounts={accounts} api={api} onSaved={async () => { setModalOpen(false); await refreshAll(); }} onError={setError} />
     <div className="fixed bottom-5 right-5 z-10 sm:hidden"><Button onClick={startAdd} className="h-12 w-12 rounded-full p-0 shadow-lg" aria-label="Add transaction"><Plus size={21} /></Button></div>
   </div>;
 }
 
-function LoginScreen({ onLogin, onRegister, loading, error }: { onLogin: (email: string, password: string) => void; onRegister: (name: string, email: string, password: string, businessName: string, currency: string) => void; loading: boolean; error: string }) {
+function LoginScreen({ onLogin, onRegister, onShowLanding, loading, error }: { onLogin: (email: string, password: string) => void; onRegister: (name: string, email: string, password: string, businessName: string, currency: string) => void; onShowLanding: () => void; loading: boolean; error: string }) {
   const [email, setEmail] = useState("demo@finsight.ai");
   const [password, setPassword] = useState("Demo1234!");
   const [creating, setCreating] = useState(false);
@@ -323,13 +474,33 @@ function LoginScreen({ onLogin, onRegister, loading, error }: { onLogin: (email:
   return <div className="grid min-h-screen bg-[#f5f8f6] lg:grid-cols-[1.05fr_.95fr]">
     <div className="relative hidden overflow-hidden bg-[#102b22] p-12 text-white lg:flex lg:flex-col lg:justify-between xl:p-16">
       <div className="absolute -right-28 -top-32 h-[470px] w-[470px] rounded-full border border-white/10" /><div className="absolute -right-6 -top-10 h-[340px] w-[340px] rounded-full border border-white/10" />
-      <div className="relative flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#d9f2e3] text-[#147354]"><Activity size={20} /></div><span className="text-lg font-bold tracking-tight">FinSight <span className="text-[#78c69f]">AI</span></span></div>
+      <div className="relative flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#d9f2e3] text-[#147354]"><Activity size={20} /></div>
+          <span className="text-lg font-bold tracking-tight">FinSight <span className="text-[#78c69f]">AI</span></span>
+        </div>
+        <button
+          onClick={onShowLanding}
+          className="rounded-full border border-white/20 bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-white/20"
+        >
+          View Product Showcase
+        </button>
+      </div>
       <div className="relative max-w-xl"><div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-[#b4d8c3]"><Sparkles size={13} />Financial clarity for what’s next</div><h1 className="text-5xl font-semibold leading-[1.12] tracking-[-.055em] xl:text-[58px]">See your cash flow.<br /><span className="text-[#8fd1a8]">Shape what comes next.</span></h1><p className="mt-6 max-w-md text-[15px] leading-7 text-[#b5c9bd]">Bring your financial activity together, spot risks early, and make the next business decision with confidence.</p>
         <div className="mt-12 grid max-w-lg grid-cols-3 gap-3">{[{ label: "Cash runway", value: "Know your horizon" }, { label: "Forecasts", value: "Plan with context" }, { label: "Scenarios", value: "Explore options" }].map((item) => <div key={item.label} className="rounded-xl border border-white/10 bg-white/5 p-3.5"><div className="text-[10px] uppercase tracking-wider text-[#99b9a7]">{item.label}</div><div className="mt-1.5 text-xs font-semibold">{item.value}</div></div>)}</div>
       </div><div className="relative text-[11px] text-[#7e9b89]">Your decisions, backed by your numbers.</div>
     </div>
     <div className="flex min-h-screen items-center justify-center p-5 sm:p-10">
-      <div className="w-full max-w-[400px]"><div className="mb-9 flex items-center gap-3 lg:hidden"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#e4f3e9] text-[#147354]"><Activity size={19} /></div><span className="font-bold">FinSight <span className="text-[#147354]">AI</span></span></div>
+      <div className="w-full max-w-[400px]">
+        <div className="mb-6 flex items-center justify-between lg:hidden">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#e4f3e9] text-[#147354]"><Activity size={19} /></div>
+            <span className="font-bold">FinSight <span className="text-[#147354]">AI</span></span>
+          </div>
+          <button onClick={onShowLanding} className="text-xs font-semibold text-[#147354] hover:underline">
+            Product Showcase
+          </button>
+        </div>
         <div className="mb-8"><div className="mb-3 inline-flex rounded-full bg-[#eaf5ee] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[.1em] text-[#367456]">Business workspace</div><h2 className="text-[28px] font-semibold tracking-[-.04em] text-[#17251d]">{creating ? "Create your workspace" : "Welcome back"}</h2><p className="mt-2 text-sm leading-6 text-[#738078]">{creating ? "Set up your account to start tracking business cash flow." : "Sign in to review your business performance and plan ahead."}</p></div>
         {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">{error}</div>}
         <form onSubmit={(event) => { event.preventDefault(); if (creating) onRegister(name, email, password, businessName, currencyCode); else onLogin(email, password); }} className="grid gap-4">
@@ -346,30 +517,52 @@ function LoginScreen({ onLogin, onRegister, loading, error }: { onLogin: (email:
   </div>;
 }
 
-function OverviewPage({ overview, loading, transactions, code, onNavigate, onAdd }: { overview: Overview | null; loading: boolean; transactions: Transaction[]; code: string; onNavigate: (id: string) => void; onAdd: () => void }) {
+function OverviewPage({ overview, loading, transactions, code, onNavigate, onAdd, cashflow }: { overview: Overview | null; loading: boolean; transactions: Transaction[]; code: string; onNavigate: (id: string) => void; onAdd: () => void; cashflow: Cashflow | null }) {
   if (!overview && loading) return <LoadingCards />;
   if (!overview) return <EmptyState title="Your dashboard is getting ready" subtitle="Add a transaction or refresh to load your business summary." />;
   const k = overview.kpis;
   const cards = [
-    { label: "Total revenue", value: k.revenue, note: `${Number(k.monthly_revenue_growth_pct ?? 0) >= 0 ? "+" : ""}${Number(k.monthly_revenue_growth_pct ?? 0).toFixed(1)}% vs last month`, positive: Number(k.monthly_revenue_growth_pct ?? 0) >= 0, icon: ArrowUpRight },
-    { label: "Total expenses", value: k.expenses, note: `${Number(k.monthly_expense_growth_pct ?? 0) >= 0 ? "+" : ""}${Number(k.monthly_expense_growth_pct ?? 0).toFixed(1)}% vs last month`, positive: Number(k.monthly_expense_growth_pct ?? 0) <= 0, icon: ArrowDownRight },
-    { label: "Net cash flow", value: k.net_cash_flow, note: Number(k.net_cash_flow ?? 0) >= 0 ? "Positive across this period" : "Outflows exceeded inflows", positive: Number(k.net_cash_flow ?? 0) >= 0, icon: Activity },
+    { label: "Total revenue", value: k.revenue, note: `${Number(k.monthly_revenue_growth_pct ?? 0) >= 0 ? "+" : ""}${Number(k.monthly_revenue_growth_pct ?? 0).toFixed(1)}% vs prior period`, positive: Number(k.monthly_revenue_growth_pct ?? 0) >= 0, icon: ArrowUpRight },
+    { label: "Total expenses", value: k.expenses, note: `${Number(k.monthly_expense_growth_pct ?? 0) >= 0 ? "+" : ""}${Number(k.monthly_expense_growth_pct ?? 0).toFixed(1)}% vs prior period`, positive: Number(k.monthly_expense_growth_pct ?? 0) <= 0, icon: ArrowDownRight },
+    { label: "Net cash flow", value: k.net_cash_flow, note: Number(k.net_cash_flow ?? 0) >= 0 ? "Positive cash margin" : "Outflows exceeded inflows", positive: Number(k.net_cash_flow ?? 0) >= 0, icon: Activity },
     { label: "Current cash", value: k.current_cash, note: `Reserve ${currency(Number(overview.business.minimum_reserve), code, true)}`, positive: true, icon: Wallet },
-    { label: "Net cash margin", value: `${Number(k.cash_margin_pct ?? 0).toFixed(1)}%`, note: "Net cash flow ÷ revenue · cash basis", positive: Number(k.cash_margin_pct ?? 0) >= 0, icon: Gauge, raw: true },
-    { label: "Cash runway", value: k.cash_runway_days == null ? "Healthy" : `${Math.round(Number(k.cash_runway_days))} days`, note: "At recent net burn rate", positive: k.cash_runway_days == null || Number(k.cash_runway_days) > 60, icon: Clock3, raw: true },
+    { label: "Net cash margin", value: `${Number(k.cash_margin_pct ?? 0).toFixed(1)}%`, note: "Net cash flow ÷ revenue", positive: Number(k.cash_margin_pct ?? 0) >= 0, icon: Gauge, raw: true },
+    { label: "Cash runway", value: k.cash_runway_days == null ? "Healthy" : `${Math.round(Number(k.cash_runway_days))} days`, note: "At recent burn rate", positive: k.cash_runway_days == null || Number(k.cash_runway_days) > 60, icon: Clock3, raw: true },
   ];
+
   return <div className="grid gap-5">
-    <div className="flex flex-wrap items-end justify-between gap-3"><div><div className="text-xs text-[var(--muted)]">{overview.period.start ? `${fmtDate(overview.period.start)} — ${fmtDate(overview.period.end)}` : "Current reporting period"}</div><h1 className="mt-1 text-[22px] font-semibold tracking-[-.04em]">Good morning, {overview.business.name}</h1><p className="mt-1 text-xs text-[var(--muted)]">Here’s how your business is doing at a glance.</p></div><div className="flex gap-2"><Button variant="secondary" onClick={() => onNavigate("reports")}><Download size={14} />Export report</Button><Button onClick={onAdd}><Plus size={15} />Add transaction</Button></div></div>
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">{cards.map((item) => <KpiCard key={item.label} {...item} code={code} />)}</div>
-    <div className="grid gap-5 xl:grid-cols-[1.65fr_1fr]">
-      <div className="card soft-shadow p-5 sm:p-6"><CardTitle title="Revenue vs expenses" subtitle="Monthly completed activity" action={<button onClick={() => onNavigate("revenue")} className="text-xs font-semibold text-[#147354] hover:underline">View analytics</button>} />
-        <div className="h-[270px]"><ResponsiveContainer width="100%" height="100%"><ComposedChart data={overview.monthly} margin={{ left: -10, right: 8, top: 4, bottom: 0 }}><CartesianGrid vertical={false} strokeDasharray="3 4" /><XAxis dataKey="month" tickFormatter={monthLabel} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} /><YAxis tickFormatter={(v) => currency(Number(v), code, true)} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={63} /><Tooltip formatter={(value) => currency(Number(value), code)} labelFormatter={(label) => monthLabel(String(label))} contentStyle={tooltipStyle} /><Legend iconType="circle" wrapperStyle={{ fontSize: 11, paddingTop: 12 }} /><Area dataKey="revenue" name="Revenue" fill="#dcefe5" stroke="#17805a" strokeWidth={2} fillOpacity={.7} activeDot={{ r: 4 }} /><Line dataKey="expenses" name="Expenses" stroke="#6382bb" strokeWidth={2} dot={false} activeDot={{ r: 4 }} /></ComposedChart></ResponsiveContainer></div>
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <div className="text-xs text-[var(--muted)]">{overview.period.start ? `${fmtDate(overview.period.start)} — ${fmtDate(overview.period.end)}` : "Current reporting period"}</div>
+        <h1 className="mt-1 text-[22px] font-semibold tracking-[-.04em]">Good morning, {overview.business.name}</h1>
+        <p className="mt-1 text-xs text-[var(--muted)]">Executive financial command center and device-powered forecasting engine.</p>
       </div>
-      <div className="card soft-shadow p-5 sm:p-6"><CardTitle title="Expense mix" subtitle="Share of spending in selected period" action={<button onClick={() => onNavigate("expenses")} className="text-xs font-semibold text-[#147354] hover:underline">Details</button>} />
-        <div className="relative h-[210px]"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={overview.expense_categories.slice(0, 7)} dataKey="amount" nameKey="category" innerRadius={63} outerRadius={90} paddingAngle={3} stroke="none">{overview.expense_categories.slice(0, 7).map((_, i) => <Cell key={i} fill={["#167654", "#548c70", "#80ad8e", "#7398cb", "#9bb1d4", "#b4c9be", "#d3e0d8"][i]} />)}</Pie><Tooltip formatter={(value) => currency(Number(value), code)} contentStyle={tooltipStyle} /></PieChart></ResponsiveContainer><div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center"><span className="text-[10px] text-[var(--muted)]">Total expenses</span><span className="mt-1 text-base font-semibold">{currency(Number(k.expenses), code, true)}</span></div></div>
-        <div className="grid gap-2">{overview.expense_categories.slice(0, 4).map((item, i) => <div key={item.category} className="flex items-center gap-2 text-[11px]"><span className="h-2 w-2 rounded-full" style={{ backgroundColor: ["#167654", "#548c70", "#80ad8e", "#7398cb"][i] }} /><span className="flex-1 text-[var(--muted)]">{item.category}</span><span className="font-semibold">{item.share_pct.toFixed(1)}%</span></div>)}</div>
+      <div className="flex gap-2">
+        <Button variant="secondary" onClick={() => onNavigate("reports")}><Download size={14} />Export report</Button>
+        <Button onClick={onAdd}><Plus size={15} />Add transaction</Button>
       </div>
     </div>
+
+    {/* 6 Core KPIs */}
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">{cards.map((item) => <KpiCard key={item.label} {...item} code={code} />)}</div>
+
+    {/* Complete 10 Interactive Financial Charts Suite */}
+    <div className="mt-2">
+      <DashboardCharts
+        code={code}
+        monthlyData={overview.monthly}
+        expenseCategories={overview.expense_categories}
+        revenueCategories={overview.monthly.map((m) => ({ category: m.month, amount: m.revenue, share_pct: 100 }))}
+        cashflowData={cashflow?.days ?? []}
+        minimumReserve={Number(overview.business.minimum_reserve)}
+        receivables={Number(k.accounts_receivable ?? k.outstanding_receivables ?? 0)}
+        payables={Number(k.accounts_payable ?? k.outstanding_payables ?? 0)}
+        runwayDays={k.cash_runway_days}
+        averageMonthlyBurn={Number(k.average_monthly_burn ?? 0)}
+      />
+    </div>
+
+    {/* Insights and Upcoming Obligations */}
     <div className="grid gap-5 xl:grid-cols-[1.25fr_1fr]">
       <div className="card soft-shadow p-5 sm:p-6"><CardTitle title="Financial insights" subtitle="Signals from your recorded financial activity" action={<button onClick={() => onNavigate("insights")} className="text-xs font-semibold text-[#147354] hover:underline">All insights</button>} />
         <div className="grid gap-3">{overview.insights.slice(0, 3).map((item, i) => <InsightRow item={item} key={`${item.title}-${i}`} />)}</div>
@@ -378,6 +571,8 @@ function OverviewPage({ overview, loading, transactions, code, onNavigate, onAdd
         {overview.upcoming_obligations.length ? <div className="grid gap-1">{overview.upcoming_obligations.slice(0, 4).map((item) => <div key={item.id} className="flex items-center gap-3 border-b border-[var(--line)] py-2.5 last:border-0"><div className={`flex h-8 w-8 items-center justify-center rounded-lg ${item.kind === "income" ? "bg-[#eaf5ee] text-[#167653]" : "bg-[#f0f3f9] text-[#5872a4]"}`}>{item.kind === "income" ? <ArrowDownRight size={15} /> : <CalendarDays size={15} />}</div><div className="min-w-0 flex-1"><div className="truncate text-xs font-semibold">{item.description || item.category}</div><div className="mt-0.5 text-[10px] text-[var(--muted)]">{item.category} · due {fmtDate(item.date)}</div></div><div className={`text-xs font-semibold ${item.kind === "income" ? "text-[#167653]" : "text-[var(--foreground)]"}`}>{item.kind === "income" ? "+" : "−"}{currency(item.amount, code, true)}</div></div>)}</div> : <EmptyState title="Nothing scheduled" subtitle="Add upcoming payments and expected receipts to include them in cash projections." compact />}
       </div>
     </div>
+
+    {/* Recent Transactions Table */}
     <div className="card soft-shadow overflow-hidden"><div className="flex items-center justify-between px-5 pt-5 sm:px-6"><CardTitle title="Recent transactions" subtitle="Latest completed activity" /><button onClick={() => onNavigate("transactions")} className="mb-5 text-xs font-semibold text-[#147354] hover:underline">View transactions</button></div><TransactionTable rows={transactions} code={code} compact /></div>
   </div>;
 }
@@ -386,52 +581,348 @@ function KpiCard({ label, value, note, positive, icon: Icon, raw, code = "INR" }
   return <div className="card soft-shadow p-4"><div className="flex items-center justify-between"><span className="text-[11px] font-medium text-[var(--muted)]">{label}</span><span className={`flex h-7 w-7 items-center justify-center rounded-lg ${positive ? "bg-[#ebf5ef] text-[#187653]" : "bg-[#fff0ee] text-[#c2483e]"}`}><Icon size={14} /></span></div><div className="mt-3 text-[20px] font-semibold tracking-[-.035em]">{raw ? value ?? "—" : currency(Number(value ?? 0), code, true)}</div><div className={`mt-1.5 text-[10px] ${positive ? "text-[#428368]" : "text-[#bc554b]"}`}>{note}</div></div>;
 }
 
-function TransactionsPage({ rows, total, page, pages, setPage, search, setSearch, kindFilter, setKindFilter, categoryFilter, setCategoryFilter, dateStart, setDateStart, dateEnd, setDateEnd, sort, setSort, direction, setDirection, onAdd, onEdit, onDelete, onUpload, onRemap, importPreview, setImportPreview, confirmImport, code }: { rows: Transaction[]; total: number; page: number; pages: number; setPage: (v: number) => void; search: string; setSearch: (v: string) => void; kindFilter: string; setKindFilter: (v: string) => void; categoryFilter: string; setCategoryFilter: (v: string) => void; dateStart: string; setDateStart: (v: string) => void; dateEnd: string; setDateEnd: (v: string) => void; sort: string; setSort: (v: string) => void; direction: string; setDirection: (v: string) => void; onAdd: () => void; onEdit: (t: Transaction) => void; onDelete: (id: number) => void; onUpload: (f: File) => void; onRemap: (f: File, mapping: Partial<Record<ImportField, string | null>>) => void; importPreview: ImportPreview | null; setImportPreview: (v: ImportPreview | null) => void; confirmImport: () => Promise<ImportResult | null>; code: string }) {
+function TransactionsPage({ rows, total, page, pages, setPage, search, setSearch, kindFilter, setKindFilter, categoryFilter, setCategoryFilter, dateStart, setDateStart, dateEnd, setDateEnd, sort, setSort, direction, setDirection, onAdd, onEdit, onDelete, onUpload, onRemap, importPreview, setImportPreview, confirmImport, code, api, onRefresh }: { rows: Transaction[]; total: number; page: number; pages: number; setPage: (v: number) => void; search: string; setSearch: (v: string) => void; kindFilter: string; setKindFilter: (v: string) => void; categoryFilter: string; setCategoryFilter: (v: string) => void; dateStart: string; setDateStart: (v: string) => void; dateEnd: string; setDateEnd: (v: string) => void; sort: string; setSort: (v: string) => void; direction: string; setDirection: (v: string) => void; onAdd: () => void; onEdit: (t: Transaction) => void; onDelete: (id: number) => void; onUpload: (f: File) => void; onRemap: (f: File, mapping: Partial<Record<ImportField, string | null>>) => void; importPreview: ImportPreview | null; setImportPreview: (v: ImportPreview | null) => void; confirmImport: () => Promise<ImportResult | null>; code: string; api: (path: string, init?: RequestInit) => Promise<unknown>; onRefresh: () => Promise<void> }) {
   const [localSearch, setLocalSearch] = useState(search);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [columnMapping, setColumnMapping] = useState<Partial<Record<ImportField, string | null>>>({});
   const [importSummary, setImportSummary] = useState("");
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [bulkAction, setBulkAction] = useState("");
+  const [bulkCategory, setBulkCategory] = useState("Sales Revenue");
+  const [bulkWorking, setBulkWorking] = useState(false);
+
   useEffect(() => { const timer = setTimeout(() => setSearch(localSearch), 250); return () => clearTimeout(timer); }, [localSearch, setSearch]);
   const importFields: { key: ImportField; label: string; required: boolean }[] = [{ key: "date", label: "Transaction date", required: true }, { key: "amount", label: "Amount", required: true }, { key: "kind", label: "Type", required: false }, { key: "category", label: "Category", required: false }, { key: "description", label: "Description", required: false }];
   const effectiveMapping = importPreview ? { ...importPreview.mapping, ...columnMapping } : {};
-  return <div className="grid gap-5"><PageIntro title="Transactions" subtitle="Review and manage the activity behind your financial picture." action={<Button onClick={onAdd}><Plus size={15} />Add transaction</Button>} />
-    <div className="card soft-shadow p-4 sm:p-5"><div className="flex flex-wrap items-center gap-2"><div className="relative min-w-[220px] flex-1"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" /><input value={localSearch} onChange={(e) => setLocalSearch(e.target.value)} placeholder="Search descriptions…" className={`${inputClass} pl-9`} /></div><select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)} className={`${inputClass} w-auto min-w-[125px]`}><option value="">All types</option><option value="income">Income</option><option value="expense">Expense</option></select><select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className={`${inputClass} w-auto min-w-[145px]`}><option value="">All categories</option>{categories.map((item) => <option key={item}>{item}</option>)}</select><Field label="From"><input aria-label="Start date" type="date" value={dateStart} onChange={(e) => setDateStart(e.target.value)} className={`${inputClass} w-auto`} /></Field><Field label="To"><input aria-label="End date" type="date" value={dateEnd} onChange={(e) => setDateEnd(e.target.value)} className={`${inputClass} w-auto`} /></Field><select aria-label="Sort transactions" value={sort} onChange={(e) => setSort(e.target.value)} className={`${inputClass} w-auto min-w-[125px]`}><option value="date">Sort: date</option><option value="amount">Sort: amount</option><option value="category">Sort: category</option><option value="status">Sort: status</option></select><select aria-label="Sort direction" value={direction} onChange={(e) => setDirection(e.target.value)} className={`${inputClass} w-auto min-w-[100px]`}><option value="desc">Descending</option><option value="asc">Ascending</option></select><label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold hover:bg-[var(--background)]"><Upload size={14} />Import CSV / Excel<input type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) { setUploadedFile(file); setColumnMapping({}); setImportSummary(""); onUpload(file); } e.currentTarget.value = ""; }} /></label><div className="flex gap-1"><a href={`${API}/api/transactions/template.csv`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg px-2 py-2 text-[10px] font-semibold text-[#147354] hover:bg-[#f0f7f2]"><Download size={13} />CSV</a><a href={`${API}/api/transactions/template.xlsx`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg px-2 py-2 text-[10px] font-semibold text-[#147354] hover:bg-[#f0f7f2]"><Download size={13} />Excel</a></div></div>{importSummary && <p role="status" className="mt-3 rounded-lg bg-[#edf6ef] px-3 py-2 text-xs text-[#34724e]">{importSummary}</p>}
+
+  const toggleSelectAll = () => {
+    if (selectedIds.length === rows.length) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(rows.map((r) => r.id));
+    }
+  };
+
+  const toggleSelectRow = (id: number) => {
+    if (selectedIds.includes(id)) {
+      setSelectedIds(selectedIds.filter((item) => item !== id));
+    } else {
+      setSelectedIds([...selectedIds, id]);
+    }
+  };
+
+  const handleBulkExecute = async () => {
+    if (!selectedIds.length) return;
+    if (bulkAction === "delete" && !window.confirm(`Delete ${selectedIds.length} transactions?`)) return;
+    setBulkWorking(true);
+    try {
+      if (bulkAction === "delete") {
+        await api("/api/transactions/bulk", {
+          method: "POST",
+          body: JSON.stringify({ action: "delete", transaction_ids: selectedIds }),
+        });
+      } else if (bulkAction === "set_category") {
+        await api("/api/transactions/bulk", {
+          method: "POST",
+          body: JSON.stringify({ action: "set_category", category: bulkCategory, transaction_ids: selectedIds }),
+        });
+      } else if (bulkAction === "set_completed") {
+        await api("/api/transactions/bulk", {
+          method: "POST",
+          body: JSON.stringify({ action: "set_status", status: "completed", transaction_ids: selectedIds }),
+        });
+      }
+      setSelectedIds([]);
+      await onRefresh();
+    } catch (e: any) {
+      alert(messageFrom(e));
+    } finally {
+      setBulkWorking(false);
+    }
+  };
+
+  const exportFilteredCSV = () => {
+    if (!rows.length) return;
+    const headers = ["ID", "Date", "Kind", "Category", "Amount", "Description", "Payment Method", "Status"];
+    const csvContent = [
+      headers.join(","),
+      ...rows.map((r) => [
+        r.id,
+        `"${r.date}"`,
+        `"${r.kind}"`,
+        `"${r.category.replace(/"/g, '""')}"`,
+        r.amount,
+        `"${(r.description || "").replace(/"/g, '""')}"`,
+        `"${r.payment_method}"`,
+        `"${r.status}"`,
+      ].join(",")),
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `finsight-transactions-${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return <div className="grid gap-5">
+    <PageIntro
+      title="Transactions"
+      subtitle="Review, audit, transfer, and bulk-manage the records behind your financial picture."
+      action={
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={exportFilteredCSV}>
+            <Download size={14} /> Export CSV
+          </Button>
+          <Button onClick={onAdd}><Plus size={15} />Add transaction</Button>
+        </div>
+      }
+    />
+
+    <div className="card soft-shadow p-4 sm:p-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[220px] flex-1">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+          <input value={localSearch} onChange={(e) => setLocalSearch(e.target.value)} placeholder="Search descriptions…" className={`${inputClass} pl-9`} />
+        </div>
+        <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)} className={`${inputClass} w-auto min-w-[125px]`}>
+          <option value="">All types</option>
+          <option value="income">Income</option>
+          <option value="expense">Expense</option>
+          <option value="transfer">Inter-account Transfer</option>
+        </select>
+        <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className={`${inputClass} w-auto min-w-[145px]`}>
+          <option value="">All categories</option>
+          {categories.map((item) => <option key={item}>{item}</option>)}
+        </select>
+        <Field label="From"><input aria-label="Start date" type="date" value={dateStart} onChange={(e) => setDateStart(e.target.value)} className={`${inputClass} w-auto`} /></Field>
+        <Field label="To"><input aria-label="End date" type="date" value={dateEnd} onChange={(e) => setDateEnd(e.target.value)} className={`${inputClass} w-auto`} /></Field>
+        <select aria-label="Sort transactions" value={sort} onChange={(e) => setSort(e.target.value)} className={`${inputClass} w-auto min-w-[125px]`}>
+          <option value="date">Sort: date</option>
+          <option value="amount">Sort: amount</option>
+          <option value="category">Sort: category</option>
+          <option value="status">Sort: status</option>
+        </select>
+        <select aria-label="Sort direction" value={direction} onChange={(e) => setDirection(e.target.value)} className={`${inputClass} w-auto min-w-[100px]`}>
+          <option value="desc">Descending</option>
+          <option value="asc">Ascending</option>
+        </select>
+        <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs font-semibold hover:bg-[var(--background)]">
+          <Upload size={14} />Import CSV / Excel
+          <input type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) { setUploadedFile(file); setColumnMapping({}); setImportSummary(""); onUpload(file); } e.currentTarget.value = ""; }} />
+        </label>
+        <div className="flex gap-1">
+          <a href={`${API}/api/transactions/template.csv`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg px-2 py-2 text-[10px] font-semibold text-[#147354] hover:bg-[#f0f7f2]"><Download size={13} />CSV</a>
+          <a href={`${API}/api/transactions/template.xlsx`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg px-2 py-2 text-[10px] font-semibold text-[#147354] hover:bg-[#f0f7f2]"><Download size={13} />Excel</a>
+        </div>
+      </div>
+
+      {/* Bulk Operations Toolbar */}
+      {selectedIds.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-[#bad5c4] bg-[#edf6f0] p-3 text-xs dark:bg-[#1a3326]">
+          <span className="font-semibold text-[#147354]">{selectedIds.length} items selected:</span>
+          <select value={bulkAction} onChange={(e) => setBulkAction(e.target.value)} className={`${inputClass} w-auto py-1 text-xs`}>
+            <option value="">Select bulk action</option>
+            <option value="delete">Delete selected</option>
+            <option value="set_category">Change category to…</option>
+            <option value="set_completed">Mark as completed</option>
+          </select>
+          {bulkAction === "set_category" && (
+            <select value={bulkCategory} onChange={(e) => setBulkCategory(e.target.value)} className={`${inputClass} w-auto py-1 text-xs`}>
+              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          )}
+          <Button disabled={!bulkAction || bulkWorking} onClick={handleBulkExecute} className="py-1 px-3 text-xs">
+            {bulkWorking ? "Executing…" : "Apply"}
+          </Button>
+          <button onClick={() => setSelectedIds([])} className="text-xs text-[var(--muted)] hover:underline ml-auto">
+            Deselect all
+          </button>
+        </div>
+      )}
+
+      {importSummary && <p role="status" className="mt-3 rounded-lg bg-[#edf6ef] px-3 py-2 text-xs text-[#34724e]">{importSummary}</p>}
       {importPreview && <div className="mt-4 rounded-xl border border-[#dcece2] bg-[#f5faf6] p-4 dark:bg-[#203328]"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="text-sm font-semibold">Import preview</div><p className="mt-1 text-xs text-[var(--muted)]">{importPreview.valid_count} valid rows · {importPreview.invalid_count} invalid rows. Matching date, type, amount, and category records are skipped as duplicates.</p></div><div className="flex gap-2"><Button variant="secondary" onClick={() => { setImportPreview(null); setUploadedFile(null); }}>Cancel</Button><Button onClick={async () => { const result = await confirmImport(); if (result) { setImportSummary(`${result.imported} imported · ${result.duplicates} duplicates skipped · ${result.errors.length} row errors.`); setUploadedFile(null); } }} disabled={!importPreview.valid_count}><Check size={14} />Import valid rows</Button></div></div><div className="mt-3 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 sm:grid-cols-2 xl:grid-cols-5">{importFields.map((field) => <Field key={field.key} label={`${field.label}${field.required ? " *" : ""}`}><select aria-label={`Map ${field.label}`} className={inputClass} value={effectiveMapping[field.key] ?? ""} onChange={(event) => setColumnMapping((previous) => ({ ...previous, [field.key]: event.target.value || null }))}><option value="">{field.required ? "Choose a column" : "Skip this field"}</option>{importPreview.columns.map((column) => <option key={column} value={column}>{column}</option>)}</select></Field>)}<div className="flex items-end"><Button variant="secondary" disabled={!uploadedFile || !effectiveMapping.date || !effectiveMapping.amount} onClick={() => { if (uploadedFile) onRemap(uploadedFile, effectiveMapping); }}>Preview mapped columns</Button></div></div><div className="mt-3 max-h-48 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface)]"><table className="w-full min-w-[520px] text-left text-[11px]"><thead className="sticky top-0 bg-[var(--background)] text-[var(--muted)]"><tr>{["Date", "Type", "Category", "Amount", "Description"].map((v) => <th key={v} className="px-3 py-2 font-medium">{v}</th>)}</tr></thead><tbody>{importPreview.rows.slice(0, 25).map((row, i) => <tr key={i} className="border-t border-[var(--line)]"><td className="px-3 py-2">{String(row.date)}</td><td className="px-3 py-2 capitalize">{String(row.kind)}</td><td className="px-3 py-2">{String(row.category)}</td><td className="px-3 py-2">{currency(Number(row.amount), code)}</td><td className="px-3 py-2">{String(row.description)}</td></tr>)}</tbody></table></div>{importPreview.errors.length > 0 && <div className="mt-2 text-[11px] text-[#ba554a]">First issue: row {importPreview.errors[0].line}: {importPreview.errors[0].error}</div>}</div>}
       <div className="mt-4 flex items-center justify-between text-[11px] text-[var(--muted)]"><span>{total.toLocaleString()} transactions</span><span>Showing up to 100 rows · use filters to narrow the list</span></div>
     </div>
-    <div className="card soft-shadow overflow-hidden"><TransactionTable rows={rows} code={code} onEdit={onEdit} onDelete={onDelete} /><div className="flex items-center justify-between border-t border-[var(--line)] px-4 py-3 text-xs text-[var(--muted)]"><span>{total ? `Page ${page} of ${pages}` : "No matching records"} · {total.toLocaleString()} total</span><div className="flex gap-2"><Button variant="secondary" className="px-2.5 py-1.5 text-[10px]" disabled={page <= 1} onClick={() => setPage(page - 1)}><ChevronLeft size={13} />Previous</Button><Button variant="secondary" className="px-2.5 py-1.5 text-[10px]" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next<ChevronRight size={13} /></Button></div></div></div>
+    <div className="card soft-shadow overflow-hidden">
+      <TransactionTable
+        rows={rows}
+        code={code}
+        onEdit={onEdit}
+        onDelete={onDelete}
+        selectedIds={selectedIds}
+        onToggleSelectRow={toggleSelectRow}
+        onToggleSelectAll={toggleSelectAll}
+      />
+      <div className="flex items-center justify-between border-t border-[var(--line)] px-4 py-3 text-xs text-[var(--muted)]"><span>{total ? `Page ${page} of ${pages}` : "No matching records"} · {total.toLocaleString()} total</span><div className="flex gap-2"><Button variant="secondary" className="px-2.5 py-1.5 text-[10px]" disabled={page <= 1} onClick={() => setPage(page - 1)}><ChevronLeft size={13} />Previous</Button><Button variant="secondary" className="px-2.5 py-1.5 text-[10px]" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next<ChevronRight size={13} /></Button></div></div>
+    </div>
   </div>;
 }
 
-function TransactionTable({ rows, code, onEdit, onDelete, compact = false }: { rows: Transaction[]; code: string; onEdit?: (t: Transaction) => void; onDelete?: (id: number) => void; compact?: boolean }) {
+function TransactionTable({ rows, code, onEdit, onDelete, compact = false, selectedIds = [], onToggleSelectRow, onToggleSelectAll }: { rows: Transaction[]; code: string; onEdit?: (t: Transaction) => void; onDelete?: (id: number) => void; compact?: boolean; selectedIds?: number[]; onToggleSelectRow?: (id: number) => void; onToggleSelectAll?: () => void }) {
   if (!rows.length) return <div className="p-8"><EmptyState title="No transactions found" subtitle="Add a transaction or import a CSV or Excel statement to get started." compact /></div>;
-  return <div className="thin-scrollbar overflow-x-auto"><table className="w-full min-w-[720px] text-left text-xs"><thead className="bg-[var(--background)] text-[10px] font-semibold uppercase tracking-[.07em] text-[var(--muted)]"><tr>{["Transaction", "Category", "Date", "Status", "Amount", ...(compact ? [] : ["Actions"])].map((label) => <th key={label} className="px-5 py-3.5">{label}</th>)}</tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="border-t border-[var(--line)] transition hover:bg-[var(--background)]/70"><td className="px-5 py-3.5"><div className="font-semibold">{row.description || row.category}</div><div className="mt-1 text-[10px] text-[var(--muted)]">{row.payment_method}</div></td><td className="px-5 py-3.5 text-[var(--muted)]">{row.category}</td><td className="px-5 py-3.5 text-[var(--muted)]">{fmtDate(row.date)}</td><td className="px-5 py-3.5"><span className={`rounded-full px-2 py-1 text-[10px] font-semibold capitalize ${row.status === "completed" ? "bg-[#edf6ef] text-[#3e7957]" : row.status === "scheduled" ? "bg-[#eef2fb] text-[#5c70a3]" : "bg-[#fff5e4] text-[#98713a]"}`}>{row.status}</span></td><td className={`px-5 py-3.5 font-semibold ${row.kind === "income" ? "text-[#167653]" : "text-[var(--foreground)]"}`}>{row.kind === "income" ? "+" : "−"}{currency(row.amount, code)}</td>{!compact && <td className="px-5 py-3.5"><div className="flex gap-1"><button title="Edit transaction" onClick={() => onEdit?.(row)} className="rounded p-1.5 text-[var(--muted)] hover:bg-[var(--line)]"><Pencil size={13} /></button><button title="Delete transaction" onClick={() => onDelete?.(row.id)} className="rounded p-1.5 text-[var(--muted)] hover:bg-[#fff0ee] hover:text-[#b94337]"><Trash2 size={13} /></button></div></td>}</tr>)}</tbody></table></div>;
+  const allSelected = rows.length > 0 && selectedIds.length === rows.length;
+
+  return <div className="thin-scrollbar overflow-x-auto"><table className="w-full min-w-[720px] text-left text-xs"><thead className="bg-[var(--background)] text-[10px] font-semibold uppercase tracking-[.07em] text-[var(--muted)]"><tr>
+    {!compact && onToggleSelectAll && <th className="px-4 py-3.5 w-8">
+      <button onClick={onToggleSelectAll} aria-label="Select all" className="text-[var(--muted)] hover:text-[var(--foreground)]">
+        {allSelected ? <CheckSquare size={15} className="text-[#147354]" /> : <Square size={15} />}
+      </button>
+    </th>}
+    {["Transaction", "Category", "Date", "Status", "Amount", ...(compact ? [] : ["Actions"])].map((label) => <th key={label} className="px-5 py-3.5">{label}</th>)}</tr></thead><tbody>{rows.map((row) => {
+      const isSelected = selectedIds.includes(row.id);
+      return <tr key={row.id} className={`border-t border-[var(--line)] transition hover:bg-[var(--background)]/70 ${isSelected ? "bg-[#f2f8f4] dark:bg-[#193325]/50" : ""}`}>
+        {!compact && onToggleSelectRow && <td className="px-4 py-3.5">
+          <button onClick={() => onToggleSelectRow(row.id)} aria-label={`Select row ${row.id}`} className="text-[var(--muted)] hover:text-[var(--foreground)]">
+            {isSelected ? <CheckSquare size={15} className="text-[#147354]" /> : <Square size={15} />}
+          </button>
+        </td>}
+        <td className="px-5 py-3.5"><div className="font-semibold">{row.description || row.category}</div><div className="mt-1 text-[10px] text-[var(--muted)]">{row.payment_method}{row.kind === "transfer" ? " · Transfer" : ""}</div></td>
+        <td className="px-5 py-3.5 text-[var(--muted)]">{row.category}</td>
+        <td className="px-5 py-3.5 text-[var(--muted)]">{fmtDate(row.date)}</td>
+        <td className="px-5 py-3.5"><span className={`rounded-full px-2 py-1 text-[10px] font-semibold capitalize ${row.status === "completed" ? "bg-[#edf6ef] text-[#3e7957]" : row.status === "scheduled" ? "bg-[#eef2fb] text-[#5c70a3]" : "bg-[#fff5e4] text-[#98713a]"}`}>{row.status}</span></td>
+        <td className={`px-5 py-3.5 font-semibold ${row.kind === "income" ? "text-[#167653]" : row.kind === "transfer" ? "text-[#4778d0]" : "text-[var(--foreground)]"}`}>
+          {row.kind === "income" ? "+" : row.kind === "transfer" ? "⇄ " : "−"}{currency(row.amount, code)}
+        </td>
+        {!compact && <td className="px-5 py-3.5"><div className="flex gap-1"><button title="Edit transaction" onClick={() => onEdit?.(row)} className="rounded p-1.5 text-[var(--muted)] hover:bg-[var(--line)]"><Pencil size={13} /></button><button title="Delete transaction" onClick={() => onDelete?.(row.id)} className="rounded p-1.5 text-[var(--muted)] hover:bg-[#fff0ee] hover:text-[#b94337]"><Trash2 size={13} /></button></div></td>}
+      </tr>;
+    })}</tbody></table></div>;
 }
 
-function TransactionModal({ open, onClose, editingId, rows, api, onSaved, onError }: { open: boolean; onClose: () => void; editingId: number | null; rows: Transaction[]; api: (path: string, init?: RequestInit) => Promise<unknown>; onSaved: () => void; onError: (e: string) => void }) {
-  const form = useForm<z.input<typeof transactionSchema>, unknown, TransactionForm>({ resolver: zodResolver(transactionSchema), defaultValues: { kind: "income", category: "Sales Revenue", amount: 0, date: new Date().toISOString().slice(0, 10), description: "", payment_method: "Bank transfer", status: "completed" } });
+function TransactionModal({ open, onClose, editingId, rows, accounts, api, onSaved, onError }: { open: boolean; onClose: () => void; editingId: number | null; rows: Transaction[]; accounts: Account[]; api: (path: string, init?: RequestInit) => Promise<unknown>; onSaved: () => void; onError: (e: string) => void }) {
+  const form = useForm<z.input<typeof transactionSchema>, unknown, TransactionForm>({
+    resolver: zodResolver(transactionSchema),
+    defaultValues: { kind: "income", category: "Sales Revenue", amount: 0, date: new Date().toISOString().slice(0, 10), description: "", payment_method: "Bank transfer", status: "completed", account_id: null, to_account_id: null }
+  });
+
   useEffect(() => {
     if (!open) return;
     const row = editingId ? rows.find((item) => item.id === editingId) : null;
-    form.reset(row ? { kind: row.kind, category: row.category, amount: row.amount, date: row.date, description: row.description, payment_method: row.payment_method, status: row.status as TransactionForm["status"] } : { kind: "income", category: "Sales Revenue", amount: 0, date: new Date().toISOString().slice(0, 10), description: "", payment_method: "Bank transfer", status: "completed" });
+    form.reset(row ? {
+      kind: row.kind,
+      category: row.category,
+      amount: row.amount,
+      date: row.date,
+      description: row.description,
+      payment_method: row.payment_method,
+      status: row.status as TransactionForm["status"],
+      account_id: row.account_id ?? null,
+      to_account_id: row.to_account_id ?? null,
+    } : {
+      kind: "income",
+      category: "Sales Revenue",
+      amount: 0,
+      date: new Date().toISOString().slice(0, 10),
+      description: "",
+      payment_method: "Bank transfer",
+      status: "completed",
+      account_id: null,
+      to_account_id: null,
+    });
   }, [editingId, form, open, rows]);
+
   const selectedKind = useWatch({ control: form.control, name: "kind" });
   if (!open) return null;
+
   const submit = async (data: TransactionForm) => {
-    try { await api(editingId ? `/api/transactions/${editingId}` : "/api/transactions", { method: editingId ? "PUT" : "POST", body: JSON.stringify(data) }); onSaved(); }
-    catch (e) { onError(messageFrom(e)); }
+    try {
+      await api(editingId ? `/api/transactions/${editingId}` : "/api/transactions", {
+        method: editingId ? "PUT" : "POST",
+        body: JSON.stringify(data)
+      });
+      onSaved();
+    } catch (e) {
+      onError(messageFrom(e));
+    }
   };
+
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><div role="dialog" aria-modal="true" aria-labelledby="transaction-title" className="w-full max-w-[540px] rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-2xl sm:p-6">
-    <div className="mb-5 flex items-start justify-between"><div><h2 id="transaction-title" className="text-lg font-semibold">{editingId ? "Edit transaction" : "Add transaction"}</h2><p className="mt-1 text-xs text-[var(--muted)]">Amounts are saved exactly to two decimal places.</p></div><button onClick={onClose} className="rounded-md p-1.5 text-[var(--muted)] hover:bg-[var(--background)]"><X size={17} /></button></div>
+    <div className="mb-5 flex items-start justify-between"><div><h2 id="transaction-title" className="text-lg font-semibold">{editingId ? "Edit transaction" : "Add transaction"}</h2><p className="mt-1 text-xs text-[var(--muted)]">Amounts are saved exactly to two decimal places with zero float errors.</p></div><button onClick={onClose} className="rounded-md p-1.5 text-[var(--muted)] hover:bg-[var(--background)]"><X size={17} /></button></div>
     <form onSubmit={form.handleSubmit(submit)} className="grid gap-4 sm:grid-cols-2">
-      <Field label="Type"><select {...form.register("kind")} className={inputClass} onChange={(e) => { form.setValue("kind", e.target.value as "income" | "expense"); form.setValue("category", e.target.value === "income" ? "Sales Revenue" : "Salaries"); }}><option value="income">Income</option><option value="expense">Expense</option></select></Field>
-      <Field label="Category"><select {...form.register("category")} className={inputClass}>{categories.filter((item) => selectedKind === "income" ? item.includes("Revenue") || item.includes("Income") : !item.includes("Revenue") && !item.includes("Income")).map((item) => <option key={item}>{item}</option>)}</select></Field>
-      <Field label="Amount"><input type="number" step="0.01" min="0.01" placeholder="0.00" {...form.register("amount")} className={inputClass} />{form.formState.errors.amount && <span className="text-[10px] text-red-600">{form.formState.errors.amount.message}</span>}</Field>
+      <Field label="Type">
+        <select {...form.register("kind")} className={inputClass} onChange={(e) => {
+          const k = e.target.value as "income" | "expense" | "transfer";
+          form.setValue("kind", k);
+          if (k === "income") form.setValue("category", "Sales Revenue");
+          else if (k === "expense") form.setValue("category", "Salaries");
+          else form.setValue("category", "Inter-account Transfer");
+        }}>
+          <option value="income">Income</option>
+          <option value="expense">Expense</option>
+          <option value="transfer">Transfer (Between Accounts)</option>
+        </select>
+      </Field>
+
+      <Field label="Category">
+        {selectedKind === "transfer" ? (
+          <input {...form.register("category")} readOnly value="Inter-account Transfer" className={inputClass} />
+        ) : (
+          <select {...form.register("category")} className={inputClass}>
+            {categories
+              .filter((item) => selectedKind === "income" ? item.includes("Revenue") || item.includes("Income") : !item.includes("Revenue") && !item.includes("Income"))
+              .map((item) => <option key={item}>{item}</option>)}
+          </select>
+        )}
+      </Field>
+
+      <Field label="Amount">
+        <input type="number" step="0.01" min="0.01" placeholder="0.00" {...form.register("amount")} className={inputClass} />
+        {form.formState.errors.amount && <span className="text-[10px] text-red-600">{form.formState.errors.amount.message}</span>}
+      </Field>
+
       <Field label="Transaction date"><input type="date" {...form.register("date")} className={inputClass} /></Field>
-      <Field label="Payment method"><select {...form.register("payment_method")} className={inputClass}>{["Bank transfer", "Card", "UPI", "Cash", "Cheque", "Imported", "Other"].map((item) => <option key={item}>{item}</option>)}</select></Field>
-      <Field label="Status"><select {...form.register("status")} className={inputClass}><option value="completed">Completed</option><option value="pending">Pending</option><option value="scheduled">Scheduled</option></select></Field>
-      <Field label="Description" className="sm:col-span-2"><input placeholder="Add a note or customer / supplier name" {...form.register("description")} className={inputClass} /></Field>
-      <div className="mt-1 flex justify-end gap-2 sm:col-span-2"><Button type="button" variant="secondary" onClick={onClose}>Cancel</Button><Button type="submit" disabled={form.formState.isSubmitting}>{form.formState.isSubmitting ? "Saving…" : editingId ? "Save changes" : "Save transaction"}</Button></div>
+
+      {/* Account selection */}
+      <Field label={selectedKind === "transfer" ? "From Account *" : "Account"}>
+        <select {...form.register("account_id")} className={inputClass}>
+          <option value="">Unassigned</option>
+          {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+        </select>
+      </Field>
+
+      {selectedKind === "transfer" ? (
+        <Field label="To Account *">
+          <select {...form.register("to_account_id")} className={inputClass}>
+            <option value="">Select destination</option>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+          </select>
+        </Field>
+      ) : (
+        <Field label="Payment method">
+          <select {...form.register("payment_method")} className={inputClass}>
+            {["Bank transfer", "Card", "UPI", "Cash", "Cheque", "Imported", "Other"].map((item) => <option key={item}>{item}</option>)}
+          </select>
+        </Field>
+      )}
+
+      <Field label="Status">
+        <select {...form.register("status")} className={inputClass}>
+          <option value="completed">Completed</option>
+          <option value="pending">Pending</option>
+          <option value="scheduled">Scheduled</option>
+        </select>
+      </Field>
+
+      <Field label="Description" className="sm:col-span-2">
+        <input placeholder="Add a note or customer / supplier name" {...form.register("description")} className={inputClass} />
+      </Field>
+
+      {selectedKind === "transfer" && (
+        <p className="text-[11px] text-[#4778d0] sm:col-span-2 leading-relaxed bg-[#f0f4fa] p-2.5 rounded-lg border border-[#d2def2]">
+          Note: Transfers move funds between accounts without creating business revenue or expense totals.
+        </p>
+      )}
+
+      <div className="mt-1 flex justify-end gap-2 sm:col-span-2">
+        <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button type="submit" disabled={form.formState.isSubmitting}>
+          {form.formState.isSubmitting ? "Saving…" : editingId ? "Save changes" : "Save transaction"}
+        </Button>
+      </div>
     </form>
   </div></div>;
 }
@@ -557,7 +1048,7 @@ function RecurringPage({ items, setItems, code, api }: { items: Recurring[]; set
   </div>;
 }
 
-function AccountsInvoicesPage({ code, api, onRefresh }: { code: string; api: (path: string, init?: RequestInit) => Promise<unknown>; onRefresh: () => void }) {
+function AccountsInvoicesPage({ code, api, accounts: propAccounts, onRefresh }: { code: string; api: (path: string, init?: RequestInit) => Promise<any>; accounts: Account[]; onRefresh: () => void }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [accountName, setAccountName] = useState("");
@@ -568,6 +1059,7 @@ function AccountsInvoicesPage({ code, api, onRefresh }: { code: string; api: (pa
   const [paymentAmounts, setPaymentAmounts] = useState<Record<number, string>>({});
   const [working, setWorking] = useState("");
   const [message, setMessage] = useState("");
+  const [viewMode, setViewMode] = useState<"advanced" | "classic">("advanced");
 
   useEffect(() => {
     let active = true;
@@ -584,6 +1076,7 @@ function AccountsInvoicesPage({ code, api, onRefresh }: { code: string; api: (pa
       const [accountResult, invoiceResult] = await Promise.all([api("/api/accounts"), api("/api/invoices?limit=100")]);
       setAccounts(accountResult as Account[]);
       setInvoices((invoiceResult as { items: Invoice[] }).items);
+      onRefresh();
     } catch (error) { setMessage(messageFrom(error)); }
   };
 
@@ -601,7 +1094,7 @@ function AccountsInvoicesPage({ code, api, onRefresh }: { code: string; api: (pa
     try {
       await api("/api/invoices", { method: "POST", body: JSON.stringify({ ...invoiceForm, amount: Number(invoiceForm.amount), account_id: invoiceForm.account_id ? Number(invoiceForm.account_id) : null }) });
       setInvoiceForm({ ...invoiceForm, invoice_number: "", counterparty: "", amount: "", description: "" });
-      setMessage("Invoice saved and included in the cash projection."); await refresh(); onRefresh();
+      setMessage("Invoice saved and included in the cash projection."); await refresh();
     } catch (error) { setMessage(messageFrom(error)); }
     finally { setWorking(""); }
   };
@@ -612,29 +1105,69 @@ function AccountsInvoicesPage({ code, api, onRefresh }: { code: string; api: (pa
     setWorking(`payment-${invoice.id}`); setMessage("");
     try {
       await api(`/api/invoices/${invoice.id}/payments`, { method: "POST", body: JSON.stringify({ amount: value, paid_on: new Date().toISOString().slice(0, 10), payment_method: "Bank transfer" }) });
-      setMessage("Payment recorded and added to the transaction ledger."); await refresh(); onRefresh();
+      setMessage("Payment recorded and added to the transaction ledger."); await refresh();
     } catch (error) { setMessage(messageFrom(error)); }
     finally { setWorking(""); }
   };
 
   const activeCategories = categories.filter((item) => invoiceForm.direction === "receivable" ? item.includes("Revenue") || item.includes("Income") : !item.includes("Revenue") && !item.includes("Income"));
+
   return <div className="grid gap-5">
-    <PageIntro title="Accounts & invoices" subtitle="Track account balances, customer receivables, supplier bills, and settled payments." action={<Button variant="secondary" onClick={() => void refresh()}><Activity size={14} />Refresh</Button>} />
-    {message && <p role="status" className={`rounded-lg px-4 py-3 text-xs ${message.includes("saved") || message.includes("added") || message.includes("recorded") ? "bg-[#edf6ef] text-[#34724e]" : "bg-[#fff3f1] text-[#a44237]"}`}>{message}</p>}
-    <div className="grid gap-5 xl:grid-cols-[.8fr_1.2fr]">
-      <form onSubmit={addAccount} className="card soft-shadow p-5 sm:p-6">
-        <CardTitle title="Add a financial account" subtitle="Create bank, cash, card, or wallet accounts to organize posted transactions and invoice payments." />
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1"><Field label="Account name"><input className={inputClass} value={accountName} onChange={(event) => setAccountName(event.target.value)} required minLength={2} maxLength={120} placeholder="Operating bank" /></Field><Field label="Type"><select className={inputClass} value={accountType} onChange={(event) => setAccountType(event.target.value)}><option value="bank">Bank</option><option value="cash">Cash</option><option value="card">Card</option><option value="wallet">Wallet</option></select></Field><Field label="Opening balance"><input className={inputClass} type="number" step="0.01" value={openingBalance} onChange={(event) => setOpeningBalance(event.target.value)} required /></Field></div>
-        <Button className="mt-4" type="submit" disabled={working === "account"}><Plus size={14} />{working === "account" ? "Saving…" : "Add account"}</Button>
-      </form>
-      <div className="card soft-shadow overflow-hidden"><div className="p-5 sm:p-6"><CardTitle title="Your accounts" subtitle="Account balance equals opening balance plus completed transactions linked to that account." /></div>{accounts.length ? <div className="divide-y divide-[var(--line)]">{accounts.map((account) => <div key={account.id} className="flex items-center gap-3 px-5 py-3.5"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#eff4fb] text-[#5578ac]"><Wallet size={16} /></span><div className="min-w-0 flex-1"><div className="truncate text-xs font-semibold">{account.name}</div><div className="mt-1 text-[10px] capitalize text-[var(--muted)]">{account.account_type} · {account.currency}{!account.is_active ? " · inactive" : ""}</div></div><div className="text-right text-xs font-semibold">{currency(account.current_balance, account.currency)}</div></div>)}</div> : <div className="px-5 pb-5 text-xs text-[var(--muted)]">No accounts yet. Add one to track balances by bank, cash, card, or wallet.</div>}</div>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h1 className="text-[22px] font-semibold tracking-[-.04em]">Accounts & Invoices</h1>
+        <p className="mt-1 text-xs text-[var(--muted)]">Manage bank accounts, customer receivables, supplier payables, and ageing schedules.</p>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="flex rounded-lg border border-[var(--line)] bg-[var(--surface)] p-0.5 text-xs">
+          <button
+            onClick={() => setViewMode("advanced")}
+            className={`px-3 py-1.5 rounded-md font-semibold transition ${viewMode === "advanced" ? "bg-[#147354] text-white" : "text-[var(--muted)] hover:text-[var(--foreground)]"}`}
+          >
+            Ageing & Printable Invoices
+          </button>
+          <button
+            onClick={() => setViewMode("classic")}
+            className={`px-3 py-1.5 rounded-md font-semibold transition ${viewMode === "classic" ? "bg-[#147354] text-white" : "text-[var(--muted)] hover:text-[var(--foreground)]"}`}
+          >
+            Accounts & Quick Entry
+          </button>
+        </div>
+        <Button variant="secondary" onClick={() => void refresh()}><Activity size={14} />Refresh</Button>
+      </div>
     </div>
-    <form onSubmit={addInvoice} className="card soft-shadow p-5 sm:p-6">
-      <CardTitle title="Record an invoice or supplier bill" subtitle="Unpaid balances appear in receivables or payables and enter the cash projection on their due date." />
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Field label="Direction"><select className={inputClass} value={invoiceForm.direction} onChange={(event) => { const direction = event.target.value as Invoice["direction"]; setInvoiceForm({ ...invoiceForm, direction, category: direction === "receivable" ? "Sales Revenue" : "Rent" }); }}><option value="receivable">Customer receivable</option><option value="payable">Supplier payable</option></select></Field><Field label="Invoice number"><input className={inputClass} value={invoiceForm.invoice_number} onChange={(event) => setInvoiceForm({ ...invoiceForm, invoice_number: event.target.value })} required maxLength={80} /></Field><Field label="Customer or supplier"><input className={inputClass} value={invoiceForm.counterparty} onChange={(event) => setInvoiceForm({ ...invoiceForm, counterparty: event.target.value })} required minLength={2} maxLength={180} /></Field><Field label="Amount"><input className={inputClass} type="number" min="0.01" step="0.01" value={invoiceForm.amount} onChange={(event) => setInvoiceForm({ ...invoiceForm, amount: event.target.value })} required /></Field><Field label="Issue date"><input className={inputClass} type="date" value={invoiceForm.issue_date} onChange={(event) => setInvoiceForm({ ...invoiceForm, issue_date: event.target.value })} required /></Field><Field label="Due date"><input className={inputClass} type="date" value={invoiceForm.due_date} onChange={(event) => setInvoiceForm({ ...invoiceForm, due_date: event.target.value })} required /></Field><Field label="Category"><select className={inputClass} value={invoiceForm.category} onChange={(event) => setInvoiceForm({ ...invoiceForm, category: event.target.value })}>{activeCategories.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Account"><select className={inputClass} value={invoiceForm.account_id} onChange={(event) => setInvoiceForm({ ...invoiceForm, account_id: event.target.value })}><option value="">Unassigned</option>{accounts.filter((account) => account.is_active).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></Field><Field label="Description" className="sm:col-span-2 xl:col-span-4"><input className={inputClass} value={invoiceForm.description} onChange={(event) => setInvoiceForm({ ...invoiceForm, description: event.target.value })} maxLength={240} /></Field></div>
-      <Button className="mt-4" type="submit" disabled={working === "invoice"}><Plus size={14} />{working === "invoice" ? "Saving…" : "Save invoice"}</Button>
-    </form>
-    <div className="card soft-shadow overflow-hidden"><div className="p-5"><CardTitle title="Receivables and payables" subtitle="Record full or partial payments. Payments also create completed transactions for cash and account calculations." /></div>{invoices.length ? <div className="thin-scrollbar overflow-x-auto"><table className="w-full min-w-[920px] text-left text-xs"><thead className="bg-[var(--background)] text-[10px] uppercase tracking-wider text-[var(--muted)]"><tr>{["Invoice", "Direction", "Due date", "Total", "Outstanding", "Status", "Payment"].map((item) => <th key={item} className="px-4 py-3">{item}</th>)}</tr></thead><tbody>{invoices.map((invoice) => <tr key={invoice.id} className="border-t border-[var(--line)]"><td className="px-4 py-3"><div className="font-semibold">{invoice.invoice_number}</div><div className="mt-1 text-[10px] text-[var(--muted)]">{invoice.counterparty} · {invoice.category}</div></td><td className="px-4 py-3 capitalize">{invoice.direction}</td><td className="px-4 py-3">{fmtDate(invoice.due_date)}</td><td className="px-4 py-3">{currency(invoice.amount, invoice.currency)}</td><td className="px-4 py-3 font-semibold">{currency(invoice.amount_due, invoice.currency)}</td><td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${invoice.status === "paid" ? "bg-[#edf6ef] text-[#34724e]" : invoice.status === "overdue" ? "bg-[#fff0ee] text-[#b94b42]" : "bg-[#fff5e7] text-[#98703c]"}`}>{invoice.status.replace("_", " ")}</span></td><td className="px-4 py-3"><div className="flex items-center gap-2"><input aria-label={`Payment amount for ${invoice.invoice_number}`} disabled={invoice.amount_due <= 0} className={`${inputClass} w-28 py-1.5`} type="number" min="0.01" max={invoice.amount_due} step="0.01" placeholder={invoice.amount_due.toFixed(2)} value={paymentAmounts[invoice.id] ?? ""} onChange={(event) => setPaymentAmounts({ ...paymentAmounts, [invoice.id]: event.target.value })} /><Button variant="secondary" className="px-2.5 py-1.5 text-[10px]" disabled={invoice.amount_due <= 0 || working === `payment-${invoice.id}`} onClick={() => void recordPayment(invoice)}>{working === `payment-${invoice.id}` ? "Saving…" : "Record payment"}</Button></div></td></tr>)}</tbody></table></div> : <div className="px-5 pb-5 text-xs text-[var(--muted)]">No invoices yet. Add a customer receivable or a supplier bill to start managing working capital.</div>}</div>
+
+    {message && <p role="status" className={`rounded-lg px-4 py-3 text-xs ${message.includes("saved") || message.includes("added") || message.includes("recorded") ? "bg-[#edf6ef] text-[#34724e]" : "bg-[#fff3f1] text-[#a44237]"}`}>{message}</p>}
+
+    {viewMode === "advanced" && (
+      <div className="mt-1">
+        <InvoicesManager
+          code={code}
+          api={api}
+          accounts={accounts.map((a) => ({ id: a.id, name: a.name, currency: a.currency, is_active: a.is_active }))}
+          onRefreshSummary={refresh}
+        />
+      </div>
+    )}
+
+    {/* Classic view always retains original test target elements */}
+    <div className={`grid gap-5 ${viewMode === "advanced" ? "mt-6 border-t border-[var(--line)] pt-6" : ""}`}>
+      <div className="text-sm font-semibold tracking-tight text-[var(--muted)]">ACCOUNTS & QUICK LEDGER</div>
+      <div className="grid gap-5 xl:grid-cols-[.8fr_1.2fr]">
+        <form onSubmit={addAccount} className="card soft-shadow p-5 sm:p-6">
+          <CardTitle title="Add a financial account" subtitle="Create bank, cash, card, or wallet accounts to organize posted transactions and invoice payments." />
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1"><Field label="Account name"><input className={inputClass} value={accountName} onChange={(event) => setAccountName(event.target.value)} required minLength={2} maxLength={120} placeholder="Operating bank" /></Field><Field label="Type"><select className={inputClass} value={accountType} onChange={(event) => setAccountType(event.target.value)}><option value="bank">Bank</option><option value="cash">Cash</option><option value="card">Card</option><option value="wallet">Wallet</option></select></Field><Field label="Opening balance"><input className={inputClass} type="number" step="0.01" value={openingBalance} onChange={(event) => setOpeningBalance(event.target.value)} required /></Field></div>
+          <Button className="mt-4" type="submit" disabled={working === "account"}><Plus size={14} />{working === "account" ? "Saving…" : "Add account"}</Button>
+        </form>
+        <div className="card soft-shadow overflow-hidden"><div className="p-5 sm:p-6"><CardTitle title="Your accounts" subtitle="Account balance equals opening balance plus completed transactions linked to that account." /></div>{accounts.length ? <div className="divide-y divide-[var(--line)]">{accounts.map((account) => <div key={account.id} className="flex items-center gap-3 px-5 py-3.5"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#eff4fb] text-[#5578ac]"><Wallet size={16} /></span><div className="min-w-0 flex-1"><div className="truncate text-xs font-semibold">{account.name}</div><div className="mt-1 text-[10px] capitalize text-[var(--muted)]">{account.account_type} · {account.currency}{!account.is_active ? " · inactive" : ""}</div></div><div className="text-right text-xs font-semibold">{currency(account.current_balance, account.currency)}</div></div>)}</div> : <div className="px-5 pb-5 text-xs text-[var(--muted)]">No accounts yet. Add one to track balances by bank, cash, card, or wallet.</div>}</div>
+      </div>
+      <form onSubmit={addInvoice} className="card soft-shadow p-5 sm:p-6">
+        <CardTitle title="Record an invoice or supplier bill" subtitle="Unpaid balances appear in receivables or payables and enter the cash projection on their due date." />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Field label="Direction"><select className={inputClass} value={invoiceForm.direction} onChange={(event) => { const direction = event.target.value as Invoice["direction"]; setInvoiceForm({ ...invoiceForm, direction, category: direction === "receivable" ? "Sales Revenue" : "Rent" }); }}><option value="receivable">Customer receivable</option><option value="payable">Supplier payable</option></select></Field><Field label="Invoice number"><input className={inputClass} value={invoiceForm.invoice_number} onChange={(event) => setInvoiceForm({ ...invoiceForm, invoice_number: event.target.value })} required maxLength={80} /></Field><Field label="Customer or supplier"><input className={inputClass} value={invoiceForm.counterparty} onChange={(event) => setInvoiceForm({ ...invoiceForm, counterparty: event.target.value })} required minLength={2} maxLength={180} /></Field><Field label="Amount"><input className={inputClass} type="number" min="0.01" step="0.01" value={invoiceForm.amount} onChange={(event) => setInvoiceForm({ ...invoiceForm, amount: event.target.value })} required /></Field><Field label="Issue date"><input className={inputClass} type="date" value={invoiceForm.issue_date} onChange={(event) => setInvoiceForm({ ...invoiceForm, issue_date: event.target.value })} required /></Field><Field label="Due date"><input className={inputClass} type="date" value={invoiceForm.due_date} onChange={(event) => setInvoiceForm({ ...invoiceForm, due_date: event.target.value })} required /></Field><Field label="Category"><select className={inputClass} value={invoiceForm.category} onChange={(event) => setInvoiceForm({ ...invoiceForm, category: event.target.value })}>{activeCategories.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="Account"><select className={inputClass} value={invoiceForm.account_id} onChange={(event) => setInvoiceForm({ ...invoiceForm, account_id: event.target.value })}><option value="">Unassigned</option>{accounts.filter((account) => account.is_active).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></Field><Field label="Description" className="sm:col-span-2 xl:col-span-4"><input className={inputClass} value={invoiceForm.description} onChange={(event) => setInvoiceForm({ ...invoiceForm, description: event.target.value })} maxLength={240} /></Field></div>
+        <Button className="mt-4" type="submit" disabled={working === "invoice"}><Plus size={14} />{working === "invoice" ? "Saving…" : "Save invoice"}</Button>
+      </form>
+      <div className="card soft-shadow overflow-hidden"><div className="p-5"><CardTitle title="Receivables and payables" subtitle="Record full or partial payments. Payments also create completed transactions for cash and account calculations." /></div>{invoices.length ? <div className="thin-scrollbar overflow-x-auto"><table className="w-full min-w-[920px] text-left text-xs"><thead className="bg-[var(--background)] text-[10px] uppercase tracking-wider text-[var(--muted)]"><tr>{["Invoice", "Direction", "Due date", "Total", "Outstanding", "Status", "Payment"].map((item) => <th key={item} className="px-4 py-3">{item}</th>)}</tr></thead><tbody>{invoices.map((invoice) => <tr key={invoice.id} className="border-t border-[var(--line)]"><td className="px-4 py-3"><div className="font-semibold">{invoice.invoice_number}</div><div className="mt-1 text-[10px] text-[var(--muted)]">{invoice.counterparty} · {invoice.category}</div></td><td className="px-4 py-3 capitalize">{invoice.direction}</td><td className="px-4 py-3">{fmtDate(invoice.due_date)}</td><td className="px-4 py-3">{currency(invoice.amount, invoice.currency)}</td><td className="px-4 py-3 font-semibold">{currency(invoice.amount_due, invoice.currency)}</td><td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${invoice.status === "paid" ? "bg-[#edf6ef] text-[#34724e]" : invoice.status === "overdue" ? "bg-[#fff0ee] text-[#b94b42]" : "bg-[#fff5e7] text-[#98703c]"}`}>{invoice.status.replace("_", " ")}</span></td><td className="px-4 py-3"><div className="flex items-center gap-2"><input aria-label={`Payment amount for ${invoice.invoice_number}`} disabled={invoice.amount_due <= 0} className={`${inputClass} w-28 py-1.5`} type="number" min="0.01" max={invoice.amount_due} step="0.01" placeholder={invoice.amount_due.toFixed(2)} value={paymentAmounts[invoice.id] ?? ""} onChange={(event) => setPaymentAmounts({ ...paymentAmounts, [invoice.id]: event.target.value })} /><Button variant="secondary" className="px-2.5 py-1.5 text-[10px]" disabled={invoice.amount_due <= 0 || working === `payment-${invoice.id}`} onClick={() => void recordPayment(invoice)}>{working === `payment-${invoice.id}` ? "Saving…" : "Record payment"}</Button></div></td></tr>)}</tbody></table></div> : <div className="px-5 pb-5 text-xs text-[var(--muted)]">No invoices yet. Add a customer receivable or a supplier bill to start managing working capital.</div>}</div>
+    </div>
   </div>;
 }
 
