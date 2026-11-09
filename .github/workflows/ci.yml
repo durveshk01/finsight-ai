@@ -115,47 +115,9 @@ jobs:
 
   android-native:
     needs: android-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        api-level: [29, 35]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: actions/download-artifact@v4
-        with:
-          name: android-validation-apk
-          path: mobile/artifacts
-      - name: Enable emulator hardware acceleration
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Exercise the real signed APK on Android
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.api-level }}
-          arch: x86_64
-          target: google_apis
-          profile: pixel_2
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -camera-back none -camera-front none
-          script: python mobile/scripts/verify-android.py --apk mobile/artifacts/FinSight-AI-1.1.0.apk --output mobile/artifacts/verification-api-${{ matrix.api-level }}
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: android-native-verification-api-${{ matrix.api-level }}
-          path: mobile/artifacts/verification-api-${{ matrix.api-level }}/
-          if-no-files-found: warn
-          retention-days: 14
+    uses: ./.github/workflows/android-native.yml
+    with:
+      apk-run-id: ${{ format('{0}', github.run_id) }}
 
   compose-smoke:
     runs-on: ubuntu-latest

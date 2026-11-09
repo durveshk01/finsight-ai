@@ -99,3 +99,11 @@ python scripts/verify-android.py --serial emulator-5554 --apk artifacts/FinSight
 The verifier intentionally clears FinSight's emulator data, installs the signed APK, disables internet, creates named verification records through the UI, verifies transfers/payments and cash, generates and inspects native files/share sheets, picks CSV/JSON documents, edits/deletes/restores records, and checks restart/close/resume persistence. It stores screenshots, UI trees, files, logs, and `results.json` under `artifacts/verification/`.
 
 Jest rendering and mocked native-module tests are useful regression checks but are not proof of APK installation or physical-device compatibility. CI exercises the same signed artifact on Android API 29 and 35 x86_64 emulators. Physical arm64-device and live hosted-cloud checks must be identified separately when reporting a release's verification.
+
+The reusable native workflow also supports verification-only runs against an existing CI APK:
+
+```sh
+gh workflow run android-native.yml -f apk-run-id=YOUR_CI_RUN_ID
+```
+
+Replace `YOUR_CI_RUN_ID` with a FinSight CI run whose `android-build` job passed. Before installation, the workflow checks that the artifact's application/build/dependency source matches the current checkout. It then retains separate results and screenshots for both emulator API levels.

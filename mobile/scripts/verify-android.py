@@ -73,11 +73,13 @@ class Device:
         time.sleep(0.35)
 
     def locate(self, value, contains=False, editable=False, direction="down"):
-        for _ in range(9):
-            node = self.find(value, contains, editable)
-            if node is not None:
-                return node
-            self.swipe(direction)
+        # Native screens retain their scroll position when revisited.
+        for travel in [direction, "up" if direction == "down" else "down"]:
+            for _ in range(9):
+                node = self.find(value, contains, editable)
+                if node is not None:
+                    return node
+                self.swipe(travel)
         raise AssertionError(f"Native UI element not found: {value}")
 
     def wait(self, value, contains=False, timeout=120):
