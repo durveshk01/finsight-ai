@@ -1,156 +1,97 @@
+import { Session, SyncPullResponse, SyncPushResponse, WorkspaceData, WorkspaceRole } from "../types";
+import { apiRequest, ApiError } from "./api";
+import { errorMessage } from "./money";
 import { MobileStorage } from "./storage";
-import { Transaction, Invoice, Account } from "../types";
+import { acknowledgeMutation, applyPull } from "./workspace";
 
-const DEFAULT_API = "https://finsight-api-public.onrender.com";
+export interface SyncResult {
+  success: boolean;
+  pushed: number;
+  pulled: number;
+  error?: string;
+  needsSignIn?: boolean;
+  role?: WorkspaceRole;
+}
 
 export class MobileSyncService {
-  private apiUrl: string;
-  private token: string | null = null;
-  private businessId: number | null = null;
-  private isSyncing = false;
+  private running = new Set<string>();
 
-  constructor(apiUrl = DEFAULT_API) {
-    this.apiUrl = apiUrl;
-  }
-
-  public setCredentials(token: string, businessId: number) {
-    this.token = token;
-    this.businessId = businessId;
-  }
-
-  public async sync(): Promise<{ success: boolean; pushed: number; pulled: number; error?: string }> {
-    if (this.isSyncing) {
-      return { success: false, pushed: 0, pulled: 0, error: "Sync already in progress" };
-    }
-    if (!this.token || !this.businessId) {
-      const auth = await MobileStorage.getAuth();
-      if (!auth.token || !auth.business) {
-        return { success: false, pushed: 0, pulled: 0, error: "Not authenticated" };
-      }
-      this.token = auth.token;
-      this.businessId = auth.business.id;
-    }
-
-    this.isSyncing = true;
-    let pushedCount = 0;
-    let pulledCount = 0;
-
+  async sync(session: Session, onChange: (data: WorkspaceData) => void = () => undefined): Promise<SyncResult> {
+    if (session.mode === "local") return { success: false, pushed: 0, pulled: 0, error: "This is a device-only workspace. Cloud sync requires a cloud account." };
+    if (!session.apiUrl || !session.token) return { success: false, pushed: 0, pulled: 0, error: "Sign in to synchronize.", needsSignIn: true };
+    if (this.running.has(session.workspaceId)) return { success: false, pushed: 0, pulled: 0, error: "Synchronization is already running." };
+    this.running.add(session.workspaceId);
+    let pushed = 0;
+    let pulled = 0;
+    let conflict: string | undefined;
+    let role: WorkspaceRole | undefined;
     try {
-      // 1. Push any queued offline mutations
-      const queue = await MobileStorage.getOfflineQueue();
-      if (queue.length > 0) {
-        const pushRes = await fetch(`${this.apiUrl}/api/sync/push`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.token}`,
-            "X-Business-Id": String(this.businessId),
-          },
-          body: JSON.stringify({ mutations: queue }),
-        });
-
-        if (pushRes.ok) {
-          const pushData = await pushRes.json();
-          for (const applied of pushData.applied ?? []) {
-            await MobileStorage.removeOfflineMutation(applied.client_mutation_id);
-            pushedCount++;
-          }
+      // Re-read after each acknowledgement: server IDs replace draft IDs in dependent mutations.
+      for (let count = 0; count < 500; count++) {
+        const local = await MobileStorage.getWorkspace(session);
+        const mutation = local.queue[0];
+        if (!mutation) break;
+        let response: SyncPushResponse;
+        try {
+          response = await apiRequest<SyncPushResponse>(session.apiUrl, "/api/sync/push", {
+            mutations: [{ client_mutation_id: mutation.client_mutation_id, entity_type: mutation.entity_type,
+              action: mutation.action, entity_id: mutation.entity_id, data: mutation.data }],
+          }, session);
+        } catch (error) {
+          // Refresh permissions even when a former editor's queued writes are refused.
+          if (!(error instanceof ApiError) || error.status !== 403) throw error;
+          role = "viewer";
+          conflict = error.message;
+          const next = await MobileStorage.updateWorkspace(session, (workspace) => ({
+            ...workspace, queue: workspace.queue.map((item) => item.client_mutation_id === mutation.client_mutation_id ? { ...item, error: conflict } : item),
+          }));
+          onChange(next);
+          break;
         }
-      }
-
-      // 2. Pull incremental updates from server
-      const { latestSeq } = await MobileStorage.getSyncMeta();
-      const pullRes = await fetch(`${this.apiUrl}/api/sync/pull`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.token}`,
-          "X-Business-Id": String(this.businessId),
-        },
-        body: JSON.stringify({ since_seq: latestSeq }),
-      });
-
-      if (!pullRes.ok) {
-        throw new Error(`Sync pull failed with status ${pullRes.status}`);
-      }
-
-      const pullData = await pullRes.json();
-      if (pullData.mode === "baseline") {
-        // Initial baseline snapshot
-        await MobileStorage.saveTransactions(pullData.data.transactions ?? []);
-        await MobileStorage.saveAccounts(pullData.data.accounts ?? []);
-        await MobileStorage.saveInvoices(pullData.data.invoices ?? []);
-        await MobileStorage.updateSyncMeta(pullData.latest_seq);
-        pulledCount = (pullData.data.transactions ?? []).length;
-      } else if (pullData.mode === "delta") {
-        // Incremental updates
-        const localTx = await MobileStorage.getTransactions();
-        let updatedTx = [...localTx];
-
-        for (const change of pullData.changes ?? []) {
-          if (change.entity_type === "transaction") {
-            if (change.action === "create") {
-              if (!updatedTx.some((t) => t.id === change.entity_id)) {
-                updatedTx.unshift(change.data);
-              }
-            } else if (change.action === "update") {
-              updatedTx = updatedTx.map((t) => (t.id === change.entity_id ? { ...t, ...change.data } : t));
-            } else if (change.action === "delete") {
-              updatedTx = updatedTx.filter((t) => t.id !== change.entity_id);
-            }
-            pulledCount++;
-          }
+        const acknowledgement = response.applied?.find((item) => item.client_mutation_id === mutation.client_mutation_id);
+        if (!acknowledgement) {
+          conflict = response.conflicts?.find((item) => item.client_mutation_id === mutation.client_mutation_id)?.error || "The server did not accept a pending change.";
+          const next = await MobileStorage.updateWorkspace(session, (workspace) => ({
+            ...workspace, queue: workspace.queue.map((item) => item.client_mutation_id === mutation.client_mutation_id ? { ...item, error: conflict } : item),
+          }));
+          onChange(next);
+          break;
         }
-
-        await MobileStorage.saveTransactions(updatedTx);
-        await MobileStorage.updateSyncMeta(pullData.new_seq);
+        const next = await MobileStorage.updateWorkspace(session, (workspace) => acknowledgeMutation(workspace, acknowledgement));
+        onChange(next);
+        pushed++;
       }
-
-      return { success: true, pushed: pushedCount, pulled: pulledCount, pushedCount, pulledCount };
-    } catch (err: any) {
-      return { success: false, pushed: pushedCount, pulled: pulledCount, pushedCount, pulledCount, error: err.message };
-    } finally {
-      this.isSyncing = false;
-    }
-  }
-
-  public async getStatus(): Promise<{ lastSync: string | null; lastSeq: number; pendingCount: number }> {
-    const meta = await MobileStorage.getSyncMeta();
-    const queue = await MobileStorage.getOfflineQueue();
-    return {
-      lastSync: meta.lastSyncTime || null,
-      lastSeq: meta.latestSeq || 0,
-      pendingCount: queue.length,
-    };
-  }
-
-  // Create an offline draft and queue it
-  public async createOfflineTransaction(tx: Omit<Transaction, "id">): Promise<Transaction> {
-    const tempId = -Math.floor(Date.now() + Math.random() * 1000);
-    const draft: Transaction = {
-      ...tx,
-      id: tempId,
-      is_offline_draft: true,
-    };
-
-    // Save locally immediately
-    const existing = await MobileStorage.getTransactions();
-    existing.unshift(draft);
-    await MobileStorage.saveTransactions(existing);
-
-    // Queue for sync
-    const clientMutationId = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    await MobileStorage.enqueueOfflineMutation({
-      client_mutation_id: clientMutationId,
-      entity_type: "transaction",
-      action: "create",
-      data: tx,
-      timestamp: new Date().toISOString(),
-    });
-
-    return draft;
+      for (let page = 0; page < 100; page++) {
+        const local = await MobileStorage.getWorkspace(session);
+        const response = await apiRequest<SyncPullResponse>(session.apiUrl, "/api/sync/pull", { since_seq: local.sync.latestSeq, limit: 200 }, session);
+        if (response.protocol_version !== 2 || response.business?.id !== session.business.id ||
+          !["owner", "admin", "accountant", "viewer"].includes(response.role) ||
+          !Number.isSafeInteger(response.latest_seq) || response.latest_seq < 0 ||
+          !["baseline", "delta"].includes(response.mode) ||
+          (response.mode === "baseline" && (!Array.isArray(response.data?.transactions) || !Array.isArray(response.data?.accounts) || !Array.isArray(response.data?.invoices)))) {
+          throw new Error("The API returned an incompatible workspace response. Deploy FinSight API 1.1 or later with sync protocol 2.");
+        }
+        role = response.role ?? "viewer";
+        pulled += response.mode === "baseline" ? response.data?.transactions.length ?? 0 : response.changes?.length ?? 0;
+        const next = await MobileStorage.updateWorkspace(session, (workspace) => applyPull(workspace, response));
+        onChange(next);
+        if (!response.has_more) break;
+        if (page === 99) throw new Error("More cloud changes remain. Synchronize again to continue.");
+      }
+      if (!conflict && (await MobileStorage.getWorkspace(session)).queue.length) conflict = "More local changes remain. Synchronize again to continue.";
+      const next = await MobileStorage.updateWorkspace(session, (workspace) => ({
+        ...workspace, sync: { ...workspace.sync, lastSyncTime: new Date().toISOString(), lastError: conflict ?? null },
+      }));
+      onChange(next);
+      return { success: !conflict, pushed, pulled, error: conflict, role };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) role = "viewer";
+      const message = errorMessage(error);
+      const next = await MobileStorage.updateWorkspace(session, (workspace) => ({ ...workspace, sync: { ...workspace.sync, lastError: message } }));
+      onChange(next);
+      return { success: false, pushed, pulled, error: message, needsSignIn: error instanceof ApiError && error.status === 401, role };
+    } finally { this.running.delete(session.workspaceId); }
   }
 }
 
 export const syncService = new MobileSyncService();
-export const MobileSyncCoordinator = syncService;

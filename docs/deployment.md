@@ -1,74 +1,45 @@
-# FinSight AI – Production Deployment & Operations Guide
+# Deployment and release operations
 
-## 1. Quick Start: Local Development with Docker Compose
+## Web/API development
 
-1. Clone repository and initialize environment:
-   ```bash
-   cp .env.example .env
-   ```
-2. Launch the full production stack:
-   ```bash
-   docker compose up --build
-   ```
-3. Services running locally:
-   - **Web Application**: `http://localhost:3000`
-   - **FastAPI Backend**: `http://localhost:8000` (Interactive Swagger docs at `/docs`)
-   - **PostgreSQL 16**: Port `5432`
-   - **Redis 7**: Port `6379`
-   - **Celery Worker**: Background statistical time-series training
-4. Default Demo Account:
-   - **Email**: `demo@finsight.ai`
-   - **Password**: `Demo1234!`
+Copy `.env.example` to `.env` and run `docker compose up --build`. The stack includes web on port 3000, API on 8000, PostgreSQL 16, Redis 7, and an optional Celery worker. `SEED_DEMO=true` creates the documented demo account; set it to false for real business deployments.
 
----
+Standalone API: Python 3.12, `backend/requirements.txt`, `DATABASE_URL` (defaults to local SQLite), Alembic `upgrade head`, then `uvicorn app.main:app --port 8000`. Startup applies migrations. Standalone web: Node 24, `npm ci`, `npm run build`, `npm start`.
 
-## 2. Cloud Deployment (Render & Vercel)
+## Render/Vercel configuration
 
-### Backend API (Render)
-1. FinSight AI backend is containerized via `backend/Dockerfile` and declared in `render.yaml`.
-2. Connect your GitHub repository to Render and create a **Blueprint Instance**.
-3. Environment variables configured in Render:
-   - `DATABASE_URL`: Managed Render PostgreSQL connection string.
-   - `DATABASE_SCHEMA`: `finsight` (enforces dedicated tenant isolation).
-   - `JWT_SECRET`: 256-bit cryptographic key.
-   - `SEED_DEMO`: `true` for staging/demo environments, `false` for live enterprise production.
-   - `CORS_ORIGINS`: Origin of the deployed web application (e.g., `https://finsight-ai.vercel.app`).
-4. Health check endpoint: `GET /health` (monitors database and service health).
+`render.yaml` declares the Docker API, `APP_ENV=production`, dedicated `DATABASE_SCHEMA=finsight`, generated JWT secret, demo seeding, CORS origin, and `/health` route. Provision or connect the declared PostgreSQL database when applying the Blueprint.
 
-### Frontend Web (Vercel)
-1. Deploy the Next.js application to Vercel.
-2. Set Environment Variables:
-   - `NEXT_PUBLIC_API_URL`: Your deployed Render backend URL (e.g. `https://finsight-api.onrender.com`).
-3. Build command: `npm run build` (runs Next.js 16 Turbopack with full TypeScript verification).
+- `DATABASE_URL`: actual PostgreSQL connection string (or SQLite for standalone development).
+- `DATABASE_SCHEMA`: optional application namespace; tenant membership still scopes financial data by business.
+- `JWT_SECRET`: non-default random secret with at least 32 bytes; production/Render startup rejects weak/default secrets.
+- `SEED_DEMO`: true only when the known demo account/data are intended.
+- `CORS_ORIGINS`: comma-separated permitted web origins.
+- `REDIS_URL`: optional shared rate-limit/background-service endpoint.
 
----
+Vercel builds the repository root with `npm run build`; set `NEXT_PUBLIC_API_URL` to the actual HTTPS API URL. `/health` reports service readiness; it is not a financial-workflow or full database-integrity test. Test authenticated ledger/invoice/sync routes separately.
 
-## 3. Mobile Android Application Deployment (`mobile/`)
+The previously referenced `https://finsight-api-public.onrender.com/health` returned **404** during this work. The web demo returning 200 does not prove a compatible API is deployed. API 1.1.0/protocol 2 must be deployed and configured before claiming live mobile cloud sync works.
 
-### Running in Android Emulator / Device
-```bash
-cd mobile
-npm install
-npx expo start
-```
-- Press `a` in the terminal to launch on a running Android emulator.
-- Scan QR code using Expo Go on a physical Android device.
+## Android release builds
 
-### Building Standalone Android Release (APK / AAB)
-```bash
-cd mobile
-npm install -g eas-cli
-eas login
-eas build -p android --profile preview
-```
+See [mobile/README.md](../mobile/README.md). From `mobile/`, use Node 24, Java 21, Android SDK 36/build-tools 36.0.0, then `npm ci` and `npm run build:android`. No EAS account is required.
 
----
+The script produces a signed, bundled, non-debuggable `artifacts/FinSight-AI-1.1.0.apk` for arm64-v8a/x86_64 and an accompanying SHA-256 file. Android API 24+ is required. Keep ignored `.signing/` privately backed up. External signing configuration is supported through `FINSIGHT_KEYSTORE_PATH`, `FINSIGHT_KEY_ALIAS`, `FINSIGHT_STORE_PASSWORD`, and `FINSIGHT_KEY_PASSWORD`.
 
-## 4. Production Verification Checklist
+For CI signing, `node scripts/configure-ci-signing.cjs owner/repository` stores the generated key/password as encrypted GitHub Actions secrets without printing them. Main-branch builds reuse that key; PR builds without release secrets use temporary validation keys. Never put keystore files, passwords, `.env.local`, or tokens into source control/release assets.
 
-- [x] All 27 backend unit and integration tests passing (`py -3.12 -m pytest backend/tests`).
-- [x] All 9 frontend Vitest tests passing (`npm run test:ui`).
-- [x] Next.js production build (`npm run build`) succeeds with 0 errors.
-- [x] Monotonic synchronization tokens verified against duplicate pushes and conflicts.
-- [x] Inter-account transfers verified to have zero net impact on business revenue or expense totals.
-- [x] AR and AP ageing buckets calculated with strict decimal precision.
+## Release verification and publication
+
+The CI workflow checks:
+
+1. Backend Alembic upgrade/check and pytest.
+2. Web clean install, lint, typecheck, UI tests, and production build.
+3. Mobile clean install with patches, Expo compatibility, typecheck, Jest/native rendering, build-tool regressions, and audit threshold (moderate or higher).
+4. Signed APK identity/signature/non-debuggable status, embedded JS/Hermes, and both 64-bit ABIs.
+5. Installation and real native financial/file/import/restore/persistence workflows using the **same APK artifact** on API 29 and 35 x86_64 emulators, with screenshots/logs/results retained.
+6. A fresh PostgreSQL-backed Compose stack, frontend reachability, login, analytics, and cash forecast smoke checks.
+
+Inspect the actual job outcomes; a unit-suite pass or build badge alone is not device verification. CI emits `android-validation-apk` plus per-emulator native verification artifacts. Publish the APK that passed those checks, together with its matching `.apk.sha256`, under a new versioned GitHub release. Compare downloaded artifact hashes and APK signing certificate before publication.
+
+Document actual tested environments and any remaining physical-device/live-cloud gaps. A signed artifact alone does not verify unsupported ABIs, iOS, arbitrary hardware, or the currently missing hosted API. Preserve the signing key for compatible subsequent Android updates.

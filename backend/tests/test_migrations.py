@@ -36,12 +36,15 @@ def test_application_migrates_a_fresh_database_and_is_idempotent(tmp_path, monke
             "users", "businesses", "business_members", "transactions", "transaction_categories",
             "recurring_transactions", "accounts", "invoices", "receivables", "payables", "payments",
             "financial_forecasts", "forecast_runs", "forecast_metrics", "financial_scenarios",
-            "scenario_assumptions", "financial_insights", "notifications", "audit_logs", "report_runs",
+            "scenario_assumptions", "financial_insights", "notifications", "audit_logs", "report_runs", "sync_changes",
         }
         assert required_tables.issubset(set(inspect(engine).get_table_names()))
         with engine.connect() as connection:
             revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-        assert revision == "f3dd8e733358"
+        assert revision == "0003_mobile_sync"
+        assert {"account_id", "to_account_id", "category_id"}.issubset({column["name"] for column in inspect(engine).get_columns("transactions")})
+        assert {"ack_json", "request_hash", "seq_num"}.issubset({column["name"] for column in inspect(engine).get_columns("sync_changes")})
+        assert {constraint["name"] for constraint in inspect(engine).get_unique_constraints("sync_changes")} == {"uq_sync_changes_business_seq", "uq_sync_changes_business_mutation"}
     finally:
         engine.dispose()
 
@@ -94,7 +97,7 @@ def test_application_adopts_unversioned_legacy_database_without_losing_transacti
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "f3dd8e733358"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003_mobile_sync"
             row = connection.execute(text(
                 "SELECT t.amount, t.category_id, c.name FROM transactions t "
                 "JOIN transaction_categories c ON c.id = t.category_id WHERE t.id = 1"

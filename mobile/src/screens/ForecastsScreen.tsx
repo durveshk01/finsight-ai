@@ -1,244 +1,35 @@
-import React, { useState, useEffect } from "react";
-import {
-  View, Text, StyleSheet, ScrollView, SafeAreaView, StatusBar, TouchableOpacity
-} from "react-native";
-import { Sparkles, TrendingUp, AlertTriangle, CheckCircle2 } from "lucide-react-native";
-import { MobileStorage } from "../services/storage";
-import { formatCurrency } from "../services/financial-engine";
+import React, { useState } from "react";
+import { Text, View } from "react-native";
+import Svg, { Line, Polyline } from "react-native-svg";
+import { Card, Choices, Heading, Metric, Notice, Screen, colors, s } from "../components/ui";
+import { useWorkspace } from "../context/WorkspaceContext";
+import { BASE_SCENARIO, forecastLocal } from "../services/financial-engine";
+import { formatCurrency } from "../services/money";
 
 export function ForecastsScreen() {
-  const [horizon, setHorizon] = useState<30 | 90>(30);
-  const [currency, setCurrency] = useState("USD");
-
-  useEffect(() => {
-    MobileStorage.getAuth().then((auth) => {
-      if (auth.business?.currency) setCurrency(auth.business.currency);
-    });
-  }, []);
-
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0d1117" />
-      <ScrollView contentContainerStyle={styles.scroll}>
-        <View style={styles.header}>
-          <div>
-            <Text style={styles.title}>AI Financial Forecasting</Text>
-            <Text style={styles.subTitle}>Cross-validated multi-model time series predictions</Text>
-          </div>
-        </View>
-
-        {/* Horizon Toggle */}
-        <View style={styles.toggleRow}>
-          <TouchableOpacity
-            style={[styles.toggleBtn, horizon === 30 && styles.toggleBtnActive]}
-            onPress={() => setHorizon(30)}
-          >
-            <Text style={[styles.toggleText, horizon === 30 && styles.toggleTextActive]}>30-Day Outlook</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.toggleBtn, horizon === 90 && styles.toggleBtnActive]}
-            onPress={() => setHorizon(90)}
-          >
-            <Text style={[styles.toggleText, horizon === 90 && styles.toggleTextActive]}>90-Day Outlook</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Forecast Summary Card */}
-        <View style={styles.summaryCard}>
-          <View style={styles.cardHeader}>
-            <Text style={styles.cardBadge}>SELECTED MODEL: HIST GRADIENT BOOSTING</Text>
-            <Sparkles size={14} color="#3fb950" />
-          </View>
-          <Text style={styles.projectedLabel}>Projected Revenue ({horizon} Days)</Text>
-          <Text style={styles.projectedAmount}>{formatCurrency(horizon === 30 ? 142000 : 438000, currency)}</Text>
-          <Text style={styles.confidenceBand}>
-            Confidence Band: {formatCurrency(horizon === 30 ? 128000 : 395000, currency)} – {formatCurrency(horizon === 30 ? 156000 : 482000, currency)}
-          </Text>
-        </View>
-
-        {/* Cash Reserve Safety Analysis */}
-        <View style={styles.safetyCard}>
-          <View style={styles.safetyHeader}>
-            <CheckCircle2 size={16} color="#3fb950" />
-            <Text style={styles.safetyTitle}>No Reserve Breach Detected</Text>
-          </View>
-          <Text style={styles.safetyDesc}>
-            Projected cash reserves remain above the minimum required buffer throughout the next {horizon} calendar days.
-          </Text>
-        </View>
-
-        {/* Model Evaluation & Validation Table */}
-        <Text style={styles.sectionHeader}>Model Benchmarks (Walk-Forward WAPE)</Text>
-        <View style={styles.modelList}>
-          <View style={styles.modelRow}>
-            <View>
-              <Text style={styles.modelName}>Hist Gradient Boosting</Text>
-              <Text style={styles.modelSub}>Selected (Lowest Error)</Text>
-            </View>
-            <Text style={styles.metricScore}>6.4% WAPE</Text>
-          </View>
-
-          <View style={styles.modelRow}>
-            <View>
-              <Text style={styles.modelName}>Holt-Winters Exponential</Text>
-              <Text style={styles.modelSub}>Trend & Seasonality</Text>
-            </View>
-            <Text style={styles.metricScore}>8.9% WAPE</Text>
-          </View>
-
-          <View style={styles.modelRow}>
-            <View>
-              <Text style={styles.modelName}>Moving Average (30d)</Text>
-              <Text style={styles.modelSub}>Baseline</Text>
-            </View>
-            <Text style={styles.metricScore}>12.1% WAPE</Text>
-          </View>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
-  );
+  const { snapshot } = useWorkspace();
+  const [horizon, setHorizon] = useState("30");
+  if (!snapshot) return null;
+  const forecast = forecastLocal(snapshot, { ...BASE_SCENARIO, horizon_days: Number(horizon) });
+  const values = [forecast.openingCash, ...forecast.days.map((day) => day.balance), snapshot.business.minimum_reserve];
+  const minimum = Math.min(...values);
+  const range = Math.max(1, Math.max(...values) - minimum);
+  const y = (value: number) => 144 - (value - minimum) / range * 128;
+  const line = [forecast.openingCash, ...forecast.days.map((day) => day.balance)].map((balance, index, rows) => `${index / (rows.length - 1) * 300},${y(balance)}`).join(" ");
+  const money = (value: number) => formatCurrency(value, snapshot.business.currency);
+  return <Screen>
+    <Heading title="Cash-flow outlook" subtitle="On-device projection from your ledger and confirmed obligations" />
+    <Choices options={[{ value: "30", label: "30 days" }, { value: "90", label: "90 days" }]} selected={horizon} onSelect={setHorizon} />
+    {!forecast.historySufficient ? <Notice text={`Insufficient history for a statistical trend (${forecast.historyDays} calendar days). This outlook includes only known invoices and pending/scheduled entries. Add at least 6 completed entries spanning 14 days for moving-average model evaluation.`} /> : <Notice text="Moving-average candidates are evaluated on chronological one-day-ahead holdouts. Projections are estimates, not guaranteed receipts or a cloud ML forecast." />}
+    <Card><Text style={s.label}>PROJECTED ENDING CASH · DAY {horizon}</Text><Text testID="forecast-closing-cash" style={s.value}>{money(forecast.closingCash)}</Text><Text style={s.muted}>Revenue model: {forecast.model}</Text>
+      <Svg width="100%" height={170} viewBox="0 0 300 160" accessibilityLabel="Projected cash balance chart">
+        <Line x1={0} x2={300} y1={y(snapshot.business.minimum_reserve)} y2={y(snapshot.business.minimum_reserve)} stroke={colors.red} strokeDasharray="4 4" />
+        <Polyline points={line} fill="none" stroke={colors.green} strokeWidth={2.5} />
+      </Svg><Text style={s.muted}>Green: projected cash · Red: minimum reserve ({money(snapshot.business.minimum_reserve)})</Text>
+    </Card>
+    <View style={s.wrap}><Metric label="Projected inflows" value={money(forecast.projectedRevenue)} /><Metric label="Projected outflows" value={money(forecast.projectedExpenses)} /></View>
+    <Notice error={Boolean(forecast.breachDate)} text={forecast.breachDate ? `Projected reserve breach: ${forecast.breachDate}. Minimum projected cash: ${money(forecast.minimumCash)}.` : `No reserve breach in this projection. Minimum projected cash: ${money(forecast.minimumCash)}. Unknown future costs are not included.`} />
+    {forecast.metrics.length ? <><Text style={s.section}>Revenue model holdout results</Text><Card>{forecast.metrics.map((metric) => <View key={metric.model} style={{ paddingVertical: 8 }}><Text style={s.text}>{metric.model}{metric.selected ? " · selected" : ""}</Text><Text style={s.muted}>MAE {money(metric.mae)} · WAPE {metric.wape == null ? "not defined (zero holdout revenue)" : `${metric.wape}%`}</Text></View>)}</Card></> : null}
+    <Text style={s.section}>Projection checkpoints</Text><Card>{forecast.days.filter((_, index) => index === 0 || (index + 1) % 7 === 0 || index === forecast.days.length - 1).map((day) => <View key={day.date} style={s.row}><Text style={s.text}>{day.date}</Text><Text style={s.text}>{money(day.balance)}</Text></View>)}</Card>
+  </Screen>;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#0d1117",
-  },
-  scroll: {
-    padding: 16,
-    paddingBottom: 32,
-  },
-  header: {
-    marginBottom: 16,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#ffffff",
-  },
-  subTitle: {
-    fontSize: 11,
-    color: "#8b949e",
-    marginTop: 2,
-  },
-  toggleRow: {
-    flexDirection: "row",
-    gap: 8,
-    marginBottom: 16,
-  },
-  toggleBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "#161b22",
-    borderWidth: 1,
-    borderColor: "#30363d",
-    alignItems: "center",
-  },
-  toggleBtnActive: {
-    backgroundColor: "#238636",
-    borderColor: "#238636",
-  },
-  toggleText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#8b949e",
-  },
-  toggleTextActive: {
-    color: "#ffffff",
-  },
-  summaryCard: {
-    backgroundColor: "#161b22",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    padding: 18,
-    marginBottom: 14,
-  },
-  cardHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  cardBadge: {
-    fontSize: 9,
-    fontWeight: "700",
-    color: "#3fb950",
-    letterSpacing: 0.8,
-  },
-  projectedLabel: {
-    fontSize: 12,
-    color: "#8b949e",
-    marginTop: 12,
-  },
-  projectedAmount: {
-    fontSize: 30,
-    fontWeight: "800",
-    color: "#ffffff",
-    marginVertical: 4,
-  },
-  confidenceBand: {
-    fontSize: 11,
-    color: "#58a6ff",
-  },
-  safetyCard: {
-    backgroundColor: "#23863615",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#23863640",
-    padding: 14,
-    marginBottom: 20,
-  },
-  safetyHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  safetyTitle: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#3fb950",
-  },
-  safetyDesc: {
-    fontSize: 11,
-    color: "#8b949e",
-    marginTop: 4,
-    lineHeight: 16,
-  },
-  sectionHeader: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#ffffff",
-    marginBottom: 10,
-  },
-  modelList: {
-    backgroundColor: "#161b22",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    overflow: "hidden",
-  },
-  modelRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: "#30363d",
-  },
-  modelName: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#ffffff",
-  },
-  modelSub: {
-    fontSize: 11,
-    color: "#8b949e",
-    marginTop: 2,
-  },
-  metricScore: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#3fb950",
-  },
-});

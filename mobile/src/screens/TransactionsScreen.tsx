@@ -1,421 +1,88 @@
-import React, { useState, useEffect } from "react";
-import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, Modal, Alert, SafeAreaView, StatusBar
-} from "react-native";
-import {
-  Search, Plus, Filter, ArrowUpRight, ArrowDownRight,
-  RefreshCw, X, Check, ArrowRightLeft
-} from "lucide-react-native";
-import { MobileStorage } from "../services/storage";
-import { syncService } from "../services/sync";
-import { formatCurrency } from "../services/financial-engine";
-import { Transaction, TransactionKind } from "../types";
+import React, { useEffect, useState } from "react";
+import { Alert, FlatList, Pressable, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
+import { Button, Choices, Empty, Field, FormModal, Heading, Notice, colors, s, useAction } from "../components/ui";
+import { useWorkspace } from "../context/WorkspaceContext";
+import { formatCurrency, parseAmount, today, validDate } from "../services/money";
+import { Transaction, TransactionInput, TransactionKind } from "../types";
+import { MainTabParamList } from "../navigation/RootNavigator";
 
-export function TransactionsScreen() {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [search, setSearch] = useState("");
-  const [filterKind, setFilterKind] = useState<"all" | TransactionKind>("all");
-  const [currency, setCurrency] = useState("USD");
-
-  // Modal State
-  const [modalVisible, setModalVisible] = useState(false);
-  const [kind, setKind] = useState<TransactionKind>("income");
-  const [category, setCategory] = useState("Sales Revenue");
-  const [amount, setAmount] = useState("");
-  const [description, setDescription] = useState("");
-
-  const loadTransactions = async () => {
-    const auth = await MobileStorage.getAuth();
-    if (auth.business?.currency) setCurrency(auth.business.currency);
-    const txs = await MobileStorage.getTransactions();
-    setTransactions(txs);
+function TransactionEditor({ existing, onClose }: { existing: Transaction | null; onClose: () => void }) {
+  const { snapshot, saveTransaction, deleteTransaction, syncing } = useWorkspace();
+  const [kind, setKind] = useState<TransactionKind>(existing?.kind ?? "income");
+  const [category, setCategory] = useState(existing?.category ?? "Sales Revenue");
+  const [amount, setAmount] = useState(existing ? String(existing.amount) : "");
+  const [date, setDate] = useState(existing?.date ?? today());
+  const [description, setDescription] = useState(existing?.description ?? "");
+  const [status, setStatus] = useState<TransactionInput["status"]>(existing?.status ?? "completed");
+  const [accountId, setAccountId] = useState(existing?.account_id == null ? "none" : String(existing.account_id));
+  const [toAccountId, setToAccountId] = useState(existing?.to_account_id == null ? "none" : String(existing.to_account_id));
+  const [reference, setReference] = useState(existing?.reference ?? "");
+  const action = useAction();
+  if (!snapshot) return null;
+  const accountOptions = [{ value: "none", label: "Unassigned" }, ...snapshot.accounts.filter((account) => account.is_active && account.currency === snapshot.business.currency).map((account) => ({ value: String(account.id), label: account.name }))];
+  const save = async () => {
+    await saveTransaction({ kind, category, amount: parseAmount(amount), date, description, status,
+      payment_method: existing?.payment_method ?? "Mobile entry", reference: reference.trim() || null,
+      account_id: accountId === "none" ? null : Number(accountId), to_account_id: kind === "transfer" && toAccountId !== "none" ? Number(toAccountId) : null }, existing?.id);
+    onClose();
   };
-
-  useEffect(() => {
-    loadTransactions();
-  }, []);
-
-  const handleSaveTransaction = async () => {
-    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-      Alert.alert("Invalid Input", "Please enter a valid numeric amount greater than zero.");
-      return;
-    }
-
-    try {
-      await syncService.createOfflineTransaction({
-        kind,
-        category,
-        amount: Number(amount),
-        date: new Date().toISOString().slice(0, 10),
-        description: description.trim() || `${category}`,
-        payment_method: "Mobile App",
-        status: "completed",
-      });
-
-      setModalVisible(false);
-      setAmount("");
-      setDescription("");
-      await loadTransactions();
-      Alert.alert("Saved Locally", "Transaction draft saved to local storage. It will synchronize automatically.");
-    } catch (err: any) {
-      Alert.alert("Error", err.message || "Could not save transaction");
-    }
+  const remove = () => {
+    if (!existing) return;
+    Alert.alert("Delete transaction?", "This removes the entry from your ledger.", [{ text: "Cancel", style: "cancel" }, { text: "Delete", style: "destructive", onPress: () => void action.run(async () => { await deleteTransaction(existing.id); onClose(); }) }]);
   };
-
-  const filtered = transactions.filter((t) => {
-    if (filterKind !== "all" && t.kind !== filterKind) return false;
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      return (
-        t.description.toLowerCase().includes(q) ||
-        t.category.toLowerCase().includes(q)
-      );
-    }
-    return true;
-  });
-
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0d1117" />
-      <View style={styles.header}>
-        <Text style={styles.title}>Transactions Ledger</Text>
-        <TouchableOpacity style={styles.addBtn} onPress={() => setModalVisible(true)}>
-          <Plus size={16} color="#ffffff" />
-          <Text style={styles.addBtnText}>Add</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Search Input */}
-      <View style={styles.searchRow}>
-        <View style={styles.searchContainer}>
-          <Search size={16} color="#8b949e" style={{ marginRight: 8 }} />
-          <TextInput
-            placeholder="Search transactions..."
-            placeholderTextColor="#8b949e"
-            value={search}
-            onChangeText={setSearch}
-            style={styles.searchInput}
-          />
-        </View>
-      </View>
-
-      {/* Filter Tabs */}
-      <View style={styles.filterTabs}>
-        {(["all", "income", "expense", "transfer"] as const).map((tab) => (
-          <TouchableOpacity
-            key={tab}
-            onPress={() => setFilterKind(tab)}
-            style={[styles.tabBtn, filterKind === tab && styles.tabBtnActive]}
-          >
-            <Text style={[styles.tabBtnText, filterKind === tab && styles.tabBtnTextActive]}>
-              {tab.toUpperCase()}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      {/* Transactions List */}
-      <FlatList
-        data={filtered}
-        keyExtractor={(item) => String(item.id)}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => (
-          <View style={styles.txCard}>
-            <View style={styles.txIconBox}>
-              {item.kind === "income" ? (
-                <ArrowUpRight size={16} color="#3fb950" />
-              ) : item.kind === "expense" ? (
-                <ArrowDownRight size={16} color="#f85149" />
-              ) : (
-                <ArrowRightLeft size={16} color="#58a6ff" />
-              )}
-            </View>
-            <View style={styles.txInfo}>
-              <Text style={styles.txDesc} numberOfLines={1}>
-                {item.description || item.category}
-              </Text>
-              <Text style={styles.txSub}>
-                {item.date} · {item.category} {item.is_offline_draft ? "· (Draft)" : ""}
-              </Text>
-            </View>
-            <Text style={[styles.txAmount, item.kind === "income" ? styles.income : styles.expense]}>
-              {item.kind === "income" ? "+" : item.kind === "expense" ? "−" : "⇄"}
-              {formatCurrency(item.amount, currency)}
-            </Text>
-          </View>
-        )}
-      />
-
-      {/* Add Transaction Modal */}
-      <Modal visible={modalVisible} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Quick Transaction Entry</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <X size={20} color="#8b949e" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Kind Selector */}
-            <View style={styles.kindSelector}>
-              {(["income", "expense", "transfer"] as const).map((k) => (
-                <TouchableOpacity
-                  key={k}
-                  onPress={() => {
-                    setKind(k);
-                    setCategory(k === "income" ? "Sales Revenue" : k === "expense" ? "Rent" : "Transfer");
-                  }}
-                  style={[styles.kindBtn, kind === k && styles.kindBtnActive]}
-                >
-                  <Text style={[styles.kindBtnText, kind === k && styles.kindBtnTextActive]}>
-                    {k.toUpperCase()}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <Text style={styles.fieldLabel}>Amount ({currency})</Text>
-            <TextInput
-              keyboardType="decimal-pad"
-              placeholder="0.00"
-              placeholderTextColor="#8b949e"
-              value={amount}
-              onChangeText={setAmount}
-              style={styles.modalInput}
-            />
-
-            <Text style={styles.fieldLabel}>Category</Text>
-            <TextInput
-              placeholder="Category name"
-              placeholderTextColor="#8b949e"
-              value={category}
-              onChangeText={setCategory}
-              style={styles.modalInput}
-            />
-
-            <Text style={styles.fieldLabel}>Description</Text>
-            <TextInput
-              placeholder="Customer / Supplier / Notes"
-              placeholderTextColor="#8b949e"
-              value={description}
-              onChangeText={setDescription}
-              style={styles.modalInput}
-            />
-
-            <TouchableOpacity style={styles.saveBtn} onPress={handleSaveTransaction}>
-              <Check size={16} color="#ffffff" style={{ marginRight: 6 }} />
-              <Text style={styles.saveBtnText}>Save Transaction (Offline Ready)</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
-  );
+  return <FormModal visible title={existing ? "Edit transaction" : "Add transaction"} onClose={() => { if (!action.busy) onClose(); }}>
+    {action.error ? <Notice text={action.error} error /> : null}
+    <Choices label="Type" options={[{ value: "income", label: "Income" }, { value: "expense", label: "Expense" }, { value: "transfer", label: "Transfer" }]} selected={kind} onSelect={(value) => { setKind(value); if (!existing) setCategory(value === "income" ? "Sales Revenue" : value === "expense" ? "Other Expenses" : "Transfer"); }} />
+    <Field label={`Amount (${snapshot.business.currency})`} testID="transaction-amount" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" />
+    <Field label="Category" testID="transaction-category" value={category} onChangeText={setCategory} maxLength={80} />
+    <Field label="Description" testID="transaction-description" value={description} onChangeText={setDescription} maxLength={240} />
+    <Field label="Date (YYYY-MM-DD)" value={date} onChangeText={setDate} maxLength={10} />
+    <Choices label="Status" options={[{ value: "completed", label: "Completed" }, { value: "pending", label: "Pending" }, { value: "scheduled", label: "Scheduled" }]} selected={status} onSelect={setStatus} />
+    <Choices label={kind === "transfer" ? "From account" : "Account"} options={accountOptions} selected={accountId} onSelect={setAccountId} />
+    {kind === "transfer" ? <Choices label="To account" options={accountOptions} selected={toAccountId} onSelect={setToAccountId} /> : null}
+    <Field label="Reference (optional)" value={reference} onChangeText={setReference} maxLength={100} />
+    <Button title="Save transaction" testID="save-transaction" busy={action.busy} disabled={syncing} onPress={() => void action.run(save)} />
+    {existing ? <View style={{ marginTop: 12 }}><Button title="Delete transaction" variant="danger" disabled={action.busy || syncing} onPress={remove} /></View> : null}
+  </FormModal>;
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#0d1117",
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 12,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#ffffff",
-  },
-  addBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    backgroundColor: "#238636",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  addBtnText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#ffffff",
-  },
-  searchRow: {
-    paddingHorizontal: 16,
-    marginBottom: 10,
-  },
-  searchContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#161b22",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    paddingHorizontal: 12,
-    height: 40,
-  },
-  searchInput: {
-    flex: 1,
-    color: "#ffffff",
-    fontSize: 13,
-  },
-  filterTabs: {
-    flexDirection: "row",
-    paddingHorizontal: 16,
-    gap: 6,
-    marginBottom: 12,
-  },
-  tabBtn: {
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    backgroundColor: "#161b22",
-  },
-  tabBtnActive: {
-    backgroundColor: "#238636",
-    borderColor: "#238636",
-  },
-  tabBtnText: {
-    fontSize: 10,
-    fontWeight: "600",
-    color: "#8b949e",
-  },
-  tabBtnTextActive: {
-    color: "#ffffff",
-  },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 24,
-  },
-  txCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#161b22",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    padding: 14,
-    marginBottom: 8,
-  },
-  txIconBox: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: "#0d1117",
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 12,
-  },
-  txInfo: {
-    flex: 1,
-  },
-  txDesc: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#ffffff",
-  },
-  txSub: {
-    fontSize: 11,
-    color: "#8b949e",
-    marginTop: 2,
-  },
-  txAmount: {
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  income: {
-    color: "#3fb950",
-  },
-  expense: {
-    color: "#ffffff",
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    justifyContent: "flex-end",
-  },
-  modalContent: {
-    backgroundColor: "#161b22",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    borderTopWidth: 1,
-    borderColor: "#30363d",
-  },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  modalTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#ffffff",
-  },
-  kindSelector: {
-    flexDirection: "row",
-    gap: 8,
-    marginBottom: 14,
-  },
-  kindBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    alignItems: "center",
-  },
-  kindBtnActive: {
-    backgroundColor: "#238636",
-    borderColor: "#238636",
-  },
-  kindBtnText: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: "#8b949e",
-  },
-  kindBtnTextActive: {
-    color: "#ffffff",
-  },
-  fieldLabel: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: "#8b949e",
-    marginBottom: 4,
-  },
-  modalInput: {
-    backgroundColor: "#0d1117",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    color: "#ffffff",
-    paddingHorizontal: 12,
-    height: 42,
-    fontSize: 13,
-    marginBottom: 12,
-  },
-  saveBtn: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#238636",
-    borderRadius: 10,
-    paddingVertical: 12,
-    marginTop: 8,
-  },
-  saveBtnText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#ffffff",
-  },
-});
+export function TransactionsScreen({ navigation, route }: BottomTabScreenProps<MainTabParamList, "Transactions">) {
+  const { snapshot, canWrite, syncing } = useWorkspace();
+  const [search, setSearch] = useState("");
+  const [kind, setKind] = useState<"all" | TransactionKind>("all");
+  const [dateFilters, setDateFilters] = useState(false);
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [editor, setEditor] = useState<{ transaction: Transaction | null } | null>(null);
+  useEffect(() => {
+    if (route.params?.compose) { setEditor({ transaction: null }); navigation.setParams({ compose: false }); }
+  }, [route.params?.compose, navigation]);
+  if (!snapshot) return null;
+  const dateError = (start && !validDate(start)) || (end && !validDate(end)) || (start && end && start > end);
+  const filtered = snapshot.transactions.filter((transaction) => {
+    const query = search.toLowerCase().trim();
+    return (kind === "all" || transaction.kind === kind) &&
+      (!query || `${transaction.description} ${transaction.category} ${transaction.reference ?? ""}`.toLowerCase().includes(query)) &&
+      (!dateFilters || dateError || ((!start || transaction.date >= start) && (!end || transaction.date <= end)));
+  });
+  return <SafeAreaView edges={["top", "left", "right"]} style={s.screen}>
+    <View style={{ padding: 18 }}><Heading title="Activity ledger" action={canWrite ? <Button title="Add" testID="add-transaction" disabled={syncing} onPress={() => setEditor({ transaction: null })} /> : undefined} />
+      <Field label="Search transactions" testID="search-transactions" placeholder="Description, category, reference" value={search} onChangeText={setSearch} />
+      <Choices options={[{ value: "all", label: "All" }, { value: "income", label: "Income" }, { value: "expense", label: "Expense" }, { value: "transfer", label: "Transfers" }]} selected={kind} onSelect={setKind} />
+      <Button title={dateFilters ? "Hide date filters" : "Filter by date"} variant="secondary" onPress={() => setDateFilters(!dateFilters)} />
+      {dateFilters ? <View style={{ marginTop: 12 }}><Field label="From date (YYYY-MM-DD)" value={start} onChangeText={setStart} /><Field label="To date (YYYY-MM-DD)" value={end} onChangeText={setEnd} />{dateError ? <Notice error text="Use valid dates, with the start on or before the end. Filters apply once the dates are valid." /> : null}</View> : null}
+      <Text style={s.muted}>{filtered.length} {filtered.length === 1 ? "entry" : "entries"} · {snapshot.business.currency}</Text>
+      {!canWrite ? <Text style={s.muted}>Read-only workspace. Cloud editors require a successful permissions sync.</Text> : null}
+    </View>
+    <FlatList data={filtered} keyExtractor={(transaction) => String(transaction.id)} contentContainerStyle={{ paddingHorizontal: 18, paddingBottom: 28 }}
+      ListEmptyComponent={<Empty text={snapshot.transactions.length ? "No entries match your filters." : "No transactions yet. Tap Add to record your first entry."} />}
+      renderItem={({ item }) => <Pressable accessibilityRole={canWrite && !item.invoice_id ? "button" : undefined} accessibilityLabel={`Edit ${item.description || item.category}`} disabled={!canWrite || Boolean(item.invoice_id) || syncing} onPress={() => setEditor({ transaction: item })} style={[s.card, { marginBottom: 10 }]}>
+        <View style={s.row}><View style={{ flex: 1 }}><Text style={s.text}>{item.description || item.category}</Text><Text style={s.muted}>{item.category} · {item.date}</Text><Text style={s.muted}>{item.status}{item.is_offline_draft ? " · pending sync" : ""}{item.invoice_id ? " · invoice payment" : ""}</Text></View>
+          <Text style={[s.text, { color: item.kind === "income" ? colors.green : item.kind === "expense" ? colors.red : colors.blue }]}>{item.kind === "income" ? "+" : item.kind === "expense" ? "−" : "↔"}{formatCurrency(item.amount, snapshot.business.currency)}</Text>
+        </View>
+      </Pressable>} />
+    {editor ? <TransactionEditor existing={editor.transaction} onClose={() => setEditor(null)} /> : null}
+  </SafeAreaView>;
+}

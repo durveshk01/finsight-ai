@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -26,6 +26,7 @@ class Business(Base):
     minimum_reserve: Mapped[Decimal] = mapped_column(Numeric(16, 2), default=Decimal("100000"))
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    sync_seq: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     members: Mapped[list["BusinessMember"]] = relationship(back_populates="business", cascade="all, delete-orphan")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="business", cascade="all, delete-orphan")
 
@@ -83,6 +84,11 @@ class Transaction(Base):
     reference: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     business: Mapped[Business] = relationship(back_populates="transactions")
+    payment: Mapped["Payment | None"] = relationship("Payment", uselist=False, viewonly=True, lazy="selectin")
+
+    @property
+    def invoice_id(self) -> int | None:
+        return self.payment.invoice_id if self.payment else None
 
 
 class Invoice(Base):
@@ -91,7 +97,7 @@ class Invoice(Base):
                       Index("ix_invoices_business_due_status", "business_id", "due_date", "status"))
     id: Mapped[int] = mapped_column(primary_key=True)
     business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"), index=True)
-    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     direction: Mapped[str] = mapped_column(String(12))
     invoice_number: Mapped[str] = mapped_column(String(80))
     counterparty: Mapped[str] = mapped_column(String(180))
@@ -136,7 +142,7 @@ class Payment(Base):
     business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"), index=True)
     invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"), index=True)
     transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id", ondelete="CASCADE"), unique=True)
-    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(16, 2))
     paid_on: Mapped[date] = mapped_column(Date)
     payment_method: Mapped[str] = mapped_column(String(48))
@@ -281,17 +287,18 @@ class AuditLog(Base):
 class SyncChange(Base):
     __tablename__ = "sync_changes"
     __table_args__ = (
-        Index("ix_sync_changes_business_seq", "business_id", "seq_num"),
-        Index("ix_sync_changes_client_mutation", "business_id", "client_mutation_id"),
+        UniqueConstraint("business_id", "seq_num", name="uq_sync_changes_business_seq"),
+        UniqueConstraint("business_id", "client_mutation_id", name="uq_sync_changes_business_mutation"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
-    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"), index=True)
-    seq_num: Mapped[int] = mapped_column(Integer, index=True)
+    business_id: Mapped[int] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"))
+    seq_num: Mapped[int] = mapped_column(BigInteger)
     entity_type: Mapped[str] = mapped_column(String(32))
     entity_id: Mapped[int] = mapped_column(Integer)
     action: Mapped[str] = mapped_column(String(16))
     client_mutation_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     data_json: Mapped[str] = mapped_column(Text, default="{}")
+    ack_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
 

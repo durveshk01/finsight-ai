@@ -1,103 +1,91 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Transaction, Account, Invoice, OfflineMutation } from "../types";
+import * as SecureStore from "expo-secure-store";
+import { Session, WorkspaceData } from "../types";
+import { emptyWorkspace } from "./workspace";
 
-const KEYS = {
-  TOKEN: "finsight_mobile_token",
-  USER: "finsight_mobile_user",
-  BUSINESS: "finsight_mobile_business",
-  TRANSACTIONS: "finsight_mobile_transactions",
-  ACCOUNTS: "finsight_mobile_accounts",
-  INVOICES: "finsight_mobile_invoices",
-  OFFLINE_QUEUE: "finsight_mobile_offline_queue",
-  LAST_SYNC_TIME: "finsight_mobile_last_sync_time",
-  LATEST_SEQ: "finsight_mobile_latest_seq",
-};
+const SESSION_KEY = "finsight.v2.session";
+const TOKEN_KEY = "finsight.v2.token";
+const LOCAL_SESSION_KEY = "finsight.v2.local-session";
+const workspaceKey = (workspaceId: string) => `finsight.v2.workspace.${workspaceId}`;
+let writes: Promise<unknown> = Promise.resolve();
+
+function serialize<T>(operation: () => Promise<T>): Promise<T> {
+  const result = writes.then(operation, operation);
+  writes = result.catch(() => undefined);
+  return result;
+}
+
+function decodeWorkspace(raw: string, session: Session): WorkspaceData {
+  const data = JSON.parse(raw) as WorkspaceData;
+  if (data.version !== 1 || data.snapshot?.business?.id !== session.business.id ||
+    !Array.isArray(data.snapshot?.transactions) || !Array.isArray(data.snapshot?.accounts) ||
+    !Array.isArray(data.snapshot?.invoices) || !Array.isArray(data.queue) ||
+    !Number.isSafeInteger(data.nextId) || data.nextId >= 0 || !data.sync || !Number.isSafeInteger(data.sync.latestSeq)) {
+    throw new Error("Workspace data could not be read. Your stored records have been retained.");
+  }
+  return data;
+}
 
 export const MobileStorage = {
-  async saveAuth(token: string, user: any, business: any) {
-    await AsyncStorage.multiSet([
-      [KEYS.TOKEN, token],
-      [KEYS.USER, JSON.stringify(user)],
-      [KEYS.BUSINESS, JSON.stringify(business)],
-    ]);
+  saveSession(session: Session): Promise<void> {
+    return serialize(async () => {
+      const { token, ...metadata } = session;
+      if (token) await SecureStore.setItemAsync(TOKEN_KEY, token, { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
+      else await SecureStore.deleteItemAsync(TOKEN_KEY);
+      await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(metadata));
+      if (session.mode === "local") await AsyncStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(metadata));
+      // Never retain the legacy plaintext bearer token.
+      await AsyncStorage.removeItem("finsight_mobile_token");
+    });
   },
 
-  async getAuth() {
-    const results = await AsyncStorage.multiGet([KEYS.TOKEN, KEYS.USER, KEYS.BUSINESS]);
-    const token = results[0][1];
-    const user = results[1][1] ? JSON.parse(results[1][1]) : null;
-    const business = results[2][1] ? JSON.parse(results[2][1]) : null;
-    return { token, user, business };
+  async getSession(): Promise<Session | null> {
+    await AsyncStorage.removeItem("finsight_mobile_token");
+    const raw = await AsyncStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const metadata = JSON.parse(raw) as Omit<Session, "token">;
+    if (!metadata.workspaceId || !metadata.business || !["local", "cloud"].includes(metadata.mode)) {
+      throw new Error("Saved session could not be restored. Sign in again.");
+    }
+    const token = metadata.mode === "cloud" ? await SecureStore.getItemAsync(TOKEN_KEY) : null;
+    if (metadata.mode === "cloud" && !token) {
+      await AsyncStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return { ...metadata, token };
   },
 
-  async clearAuth() {
-    await AsyncStorage.multiRemove([KEYS.TOKEN, KEYS.USER, KEYS.BUSINESS]);
+  async getLocalSession(): Promise<Session | null> {
+    const raw = await AsyncStorage.getItem(LOCAL_SESSION_KEY);
+    if (!raw) return null;
+    const metadata = JSON.parse(raw) as Omit<Session, "token">;
+    if (metadata.mode !== "local" || !metadata.workspaceId || !metadata.business || !metadata.user) return null;
+    return { ...metadata, token: null };
   },
 
-  async saveTransactions(transactions: Transaction[]) {
-    await AsyncStorage.setItem(KEYS.TRANSACTIONS, JSON.stringify(transactions));
+  clearSession(): Promise<void> {
+    return serialize(async () => {
+      await SecureStore.deleteItemAsync(TOKEN_KEY);
+      await AsyncStorage.multiRemove([SESSION_KEY, "finsight_mobile_token", "finsight_mobile_user", "finsight_mobile_business"]);
+    });
   },
 
-  async getTransactions(): Promise<Transaction[]> {
-    const data = await AsyncStorage.getItem(KEYS.TRANSACTIONS);
-    return data ? JSON.parse(data) : [];
+  async getWorkspace(session: Session): Promise<WorkspaceData> {
+    await writes;
+    const raw = await AsyncStorage.getItem(workspaceKey(session.workspaceId));
+    if (!raw) return emptyWorkspace(session);
+    return decodeWorkspace(raw, session);
   },
 
-  async saveAccounts(accounts: Account[]) {
-    await AsyncStorage.setItem(KEYS.ACCOUNTS, JSON.stringify(accounts));
-  },
-
-  async getAccounts(): Promise<Account[]> {
-    const data = await AsyncStorage.getItem(KEYS.ACCOUNTS);
-    return data ? JSON.parse(data) : [];
-  },
-
-  async saveInvoices(invoices: Invoice[]) {
-    await AsyncStorage.setItem(KEYS.INVOICES, JSON.stringify(invoices));
-  },
-
-  async getInvoices(): Promise<Invoice[]> {
-    const data = await AsyncStorage.getItem(KEYS.INVOICES);
-    return data ? JSON.parse(data) : [];
-  },
-
-  async getOfflineQueue(): Promise<OfflineMutation[]> {
-    const data = await AsyncStorage.getItem(KEYS.OFFLINE_QUEUE);
-    return data ? JSON.parse(data) : [];
-  },
-
-  async enqueueOfflineMutation(mutation: OfflineMutation) {
-    const queue = await this.getOfflineQueue();
-    queue.push(mutation);
-    await AsyncStorage.setItem(KEYS.OFFLINE_QUEUE, JSON.stringify(queue));
-  },
-
-  async removeOfflineMutation(clientMutationId: string) {
-    const queue = await this.getOfflineQueue();
-    const updated = queue.filter((m) => m.client_mutation_id !== clientMutationId);
-    await AsyncStorage.setItem(KEYS.OFFLINE_QUEUE, JSON.stringify(updated));
-  },
-
-  async clearOfflineQueue() {
-    await AsyncStorage.removeItem(KEYS.OFFLINE_QUEUE);
-  },
-
-  async setOfflineQueue(queue: OfflineMutation[]) {
-    await AsyncStorage.setItem(KEYS.OFFLINE_QUEUE, JSON.stringify(queue));
-  },
-
-  async getSyncMeta() {
-    const res = await AsyncStorage.multiGet([KEYS.LAST_SYNC_TIME, KEYS.LATEST_SEQ]);
-    return {
-      lastSyncTime: res[0][1],
-      latestSeq: res[1][1] ? Number(res[1][1]) : 0,
-    };
-  },
-
-  async updateSyncMeta(seq: number) {
-    await AsyncStorage.multiSet([
-      [KEYS.LAST_SYNC_TIME, new Date().toISOString()],
-      [KEYS.LATEST_SEQ, String(seq)],
-    ]);
+  updateWorkspace(session: Session, update: (workspace: WorkspaceData) => WorkspaceData): Promise<WorkspaceData> {
+    // One atomic storage write contains both the ledger snapshot and its mutation queue.
+    // Serializing read-modify-write operations prevents rapid taps/sync from losing entries.
+    return serialize(async () => {
+      const raw = await AsyncStorage.getItem(workspaceKey(session.workspaceId));
+      const workspace = raw ? decodeWorkspace(raw, session) : emptyWorkspace(session);
+      const next = update(workspace);
+      await AsyncStorage.setItem(workspaceKey(session.workspaceId), JSON.stringify(next));
+      return next;
+    });
   },
 };

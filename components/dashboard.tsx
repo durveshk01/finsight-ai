@@ -9,17 +9,17 @@ import {
   Check, ChevronDown, CircleDollarSign, Clock3, Download, FileText, Gauge,
   LayoutDashboard, Lightbulb, LogOut, Menu, Moon, MoreHorizontal, Pencil,
   Plus, Search, Settings, ShieldAlert, SlidersHorizontal, Sparkles, Sun,
-  Trash2, Upload, Wallet, X, ChevronLeft, ChevronRight, RefreshCw, CheckSquare,
-  Square, Globe, Printer, type LucideIcon,
+  Trash2, Upload, Wallet, X, ChevronLeft, ChevronRight, CheckSquare,
+  Square, Globe, type LucideIcon,
 } from "lucide-react";
 import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend,
-  Line, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Area, AreaChart, Bar, BarChart, CartesianGrid, ComposedChart, Legend,
+  Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { Button, CardTitle, Field, inputClass } from "@/components/ui";
 import { LandingPage } from "@/components/landing-page";
 import { DashboardCharts } from "@/components/dashboard-charts";
-import { InvoicesManager, AccountOption } from "@/components/invoices-manager";
+import { InvoicesManager } from "@/components/invoices-manager";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const categories = [
@@ -634,7 +634,7 @@ function TransactionsPage({ rows, total, page, pages, setPage, search, setSearch
       }
       setSelectedIds([]);
       await onRefresh();
-    } catch (e: any) {
+    } catch (e: unknown) {
       alert(messageFrom(e));
     } finally {
       setBulkWorking(false);
@@ -1048,8 +1048,8 @@ function RecurringPage({ items, setItems, code, api }: { items: Recurring[]; set
   </div>;
 }
 
-function AccountsInvoicesPage({ code, api, accounts: propAccounts, onRefresh }: { code: string; api: (path: string, init?: RequestInit) => Promise<any>; accounts: Account[]; onRefresh: () => void }) {
-  const [accounts, setAccounts] = useState<Account[]>([]);
+function AccountsInvoicesPage({ code, api, accounts: propAccounts, onRefresh }: { code: string; api: (path: string, init?: RequestInit) => Promise<unknown>; accounts: Account[]; onRefresh: () => void }) {
+  const [accounts, setAccounts] = useState<Account[]>(propAccounts);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [accountName, setAccountName] = useState("");
   const [accountType, setAccountType] = useState("bank");
@@ -1092,7 +1092,7 @@ function AccountsInvoicesPage({ code, api, accounts: propAccounts, onRefresh }: 
   const addInvoice = async (event: React.FormEvent) => {
     event.preventDefault(); setWorking("invoice"); setMessage("");
     try {
-      await api("/api/invoices", { method: "POST", body: JSON.stringify({ ...invoiceForm, amount: Number(invoiceForm.amount), account_id: invoiceForm.account_id ? Number(invoiceForm.account_id) : null }) });
+      await api("/api/invoices", { method: "POST", body: JSON.stringify({ ...invoiceForm, currency: code, amount: Number(invoiceForm.amount), account_id: invoiceForm.account_id ? Number(invoiceForm.account_id) : null }) });
       setInvoiceForm({ ...invoiceForm, invoice_number: "", counterparty: "", amount: "", description: "" });
       setMessage("Invoice saved and included in the cash projection."); await refresh();
     } catch (error) { setMessage(messageFrom(error)); }

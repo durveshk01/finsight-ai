@@ -2,11 +2,6 @@
 
 import React, { useState } from "react";
 import {
-  Activity, ArrowDownRight, ArrowUpRight, BarChart3, Calendar,
-  ChevronDown, Clock3, DollarSign, Layers, PieChart as PieIcon,
-  ShieldAlert, TrendingDown, TrendingUp, Wallet
-} from "lucide-react";
-import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell,
   ComposedChart, Legend, Line, Pie, PieChart,
   ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis
@@ -168,7 +163,7 @@ export function DashboardCharts({
                   <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="var(--line)" />
                   <XAxis dataKey="month" tickFormatter={fmtMonth} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} />
                   <YAxis tickFormatter={(v) => fmtCurrency(Number(v), true)} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={64} />
-                  <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtMonth(String(l))} contentStyle={tooltipStyle} />
+                  <Tooltip formatter={(v) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtMonth(String(l))} contentStyle={tooltipStyle} />
                   <Legend iconType="circle" wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
                   <Area dataKey="revenue" name="Revenue" fill="#2ea043" stroke="#238636" strokeWidth={2} fillOpacity={0.15} />
                   <Line dataKey="expenses" name="Expenses" stroke="#58a6ff" strokeWidth={2} dot={{ r: 3 }} />
@@ -191,7 +186,7 @@ export function DashboardCharts({
                   <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="var(--line)" />
                   <XAxis dataKey="month" tickFormatter={fmtMonth} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} />
                   <YAxis tickFormatter={(v) => fmtCurrency(Number(v), true)} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={64} />
-                  <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtMonth(String(l))} contentStyle={tooltipStyle} />
+                  <Tooltip formatter={(v) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtMonth(String(l))} contentStyle={tooltipStyle} />
                   <Legend iconType="circle" wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
                   <ReferenceLine y={0} stroke="var(--line)" />
                   <Bar dataKey="net_cash_flow" name="Net Cash Flow" radius={[4, 4, 0, 0]}>
@@ -227,7 +222,7 @@ export function DashboardCharts({
                   <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="var(--line)" />
                   <XAxis dataKey="date" tickFormatter={fmtDay} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} />
                   <YAxis tickFormatter={(v) => fmtCurrency(Number(v), true)} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={64} />
-                  <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtDay(String(l))} contentStyle={tooltipStyle} />
+                  <Tooltip formatter={(v) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtDay(String(l))} contentStyle={tooltipStyle} />
                   <ReferenceLine y={minimumReserve} stroke="#f85149" strokeDasharray="3 3" label={{ value: "Reserve", position: "insideTopLeft", fill: "#f85149", fontSize: 10 }} />
                   <Area dataKey="balance" name="Cash Balance" stroke="#167654" strokeWidth={2} fill="#238636" fillOpacity={0.15} />
                 </AreaChart>
@@ -249,7 +244,7 @@ export function DashboardCharts({
                   <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="var(--line)" />
                   <XAxis dataKey="date" tickFormatter={fmtDay} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} />
                   <YAxis tickFormatter={(v) => fmtCurrency(Number(v), true)} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={64} />
-                  <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtDay(String(l))} contentStyle={tooltipStyle} />
+                  <Tooltip formatter={(v) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtDay(String(l))} contentStyle={tooltipStyle} />
                   <Area dataKey="upper_balance" stroke="none" fill="#58a6ff" fillOpacity={0.12} name="Upper Bound" />
                   <Area dataKey="lower_balance" stroke="none" fill="var(--surface)" fillOpacity={1} name="Lower Bound" />
                   <Line dataKey="balance" stroke="#2ea043" strokeWidth={2} dot={false} name="Expected Position" />
@@ -286,7 +281,7 @@ export function DashboardCharts({
                         <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} contentStyle={tooltipStyle} />
+                    <Tooltip formatter={(v) => fmtCurrency(Number(v))} contentStyle={tooltipStyle} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
@@ -318,7 +313,7 @@ export function DashboardCharts({
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={revenueCategories.length > 0 ? revenueCategories : [{ category: "Sales Revenue", amount: 1, share_pct: 100 }]}
+                      data={revenueCategories}
                       dataKey="amount"
                       nameKey="category"
                       innerRadius={55}
@@ -330,7 +325,7 @@ export function DashboardCharts({
                         <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} contentStyle={tooltipStyle} />
+                    <Tooltip formatter={(v) => fmtCurrency(Number(v))} contentStyle={tooltipStyle} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
@@ -347,6 +342,7 @@ export function DashboardCharts({
                     </div>
                   </div>
                 ))}
+                {revenueCategories.length === 0 && <p className="text-[var(--muted)]">No completed revenue categories in this period.</p>}
               </div>
             </div>
           </div>
@@ -385,7 +381,7 @@ export function DashboardCharts({
                 <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="var(--line)" />
                 <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 11 }} />
                 <YAxis tickFormatter={(v) => fmtCurrency(Number(v), true)} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={64} />
-                <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} contentStyle={tooltipStyle} />
+                <Tooltip formatter={(v) => fmtCurrency(Number(v))} contentStyle={tooltipStyle} />
                 <Bar dataKey="amount" radius={[6, 6, 0, 0]}>
                   <Cell fill="#2ea043" />
                   <Cell fill="#f85149" />
@@ -412,7 +408,7 @@ export function DashboardCharts({
                   <CartesianGrid vertical={false} strokeDasharray="3 4" stroke="var(--line)" />
                   <XAxis dataKey="month" tickFormatter={fmtMonth} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} />
                   <YAxis tickFormatter={(v) => fmtCurrency(Number(v), true)} tickLine={false} axisLine={false} tick={{ fontSize: 10 }} width={64} />
-                  <Tooltip formatter={(v: any) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtMonth(String(l))} contentStyle={tooltipStyle} />
+                  <Tooltip formatter={(v) => fmtCurrency(Number(v))} labelFormatter={(l) => fmtMonth(String(l))} contentStyle={tooltipStyle} />
                   <Legend iconType="circle" wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
                   <Bar dataKey="revenue" name="Monthly Revenue" fill="#2ea043" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="expenses" name="Monthly Expenses" fill="#58a6ff" radius={[4, 4, 0, 0]} />
@@ -452,14 +448,14 @@ export function DashboardCharts({
               <div className="rounded-xl border border-[var(--line)] bg-[var(--background)] p-4">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-[var(--muted)]">Runway Health Status</span>
-                  <span className="font-bold text-[#2ea043]">
-                    {runwayDays === null || runwayDays > 180 ? "Sustained Positive Inflow" : `${runwayDays} Days Available`}
+                  <span className="font-bold text-[var(--foreground)]">
+                    {runwayDays === null ? "No trailing net burn" : `${runwayDays} Days Available`}
                   </span>
                 </div>
                 <p className="mt-2 text-[11px] leading-5 text-[var(--muted)]">
-                  {runwayDays === null || runwayDays > 180
-                    ? "Inflows consistently cover operational obligations. Cash reserves remain above target safety buffers."
-                    : "Caution: Accelerate customer collections and review discretionary expenses to extend the operating cash runway."}
+                  {runwayDays === null
+                    ? "Recorded inflows cover spending over the trailing period. Future obligations and reserve targets should be reviewed separately."
+                    : "This estimate uses recorded trailing net burn. Accelerate collections or review expenses to extend runway; future cash flows may differ."}
                 </p>
               </div>
             </div>

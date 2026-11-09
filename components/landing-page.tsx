@@ -2,13 +2,12 @@
 
 import { useState } from "react";
 import {
-  Activity, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, ChevronRight,
-  CircleDollarSign, Clock3, Cpu, Database, Eye, Gauge, Globe, Layers,
-  Lightbulb, Lock, MoveRight, Phone, Play, Shield, ShieldCheck,
-  Smartphone, Sparkles, TrendingUp, Users, Wallet, Zap
+  Activity, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown,
+  CircleDollarSign, Clock3, Cpu, Database, Gauge, Layers,
+  Lock, Play, ShieldCheck, Sparkles, TrendingUp
 } from "lucide-react";
 import {
-  Area, AreaChart, CartesianGrid, ComposedChart, Line, ResponsiveContainer,
+  Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer,
   Tooltip, XAxis, YAxis
 } from "recharts";
 
@@ -253,7 +252,7 @@ export function LandingPage({ onLaunchApp, onExploreDemo, onOpenLogin }: Landing
                     <YAxis stroke="#8b949e" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v / 1000}k`} />
                     <Tooltip
                       contentStyle={{ backgroundColor: "#161b22", borderColor: "#30363d", borderRadius: 8, fontSize: 12, color: "#fff" }}
-                      formatter={(value: any) => [`$${Number(value).toLocaleString()}`, "Amount"]}
+                      formatter={(value) => [`$${Number(value).toLocaleString()}`, "Amount"]}
                     />
                     <Area dataKey="upper" stroke="none" fill="#1f6feb" fillOpacity={0.12} />
                     <Area dataKey="lower" stroke="none" fill="#0d1117" fillOpacity={1} />
@@ -399,7 +398,7 @@ export function LandingPage({ onLaunchApp, onExploreDemo, onOpenLogin }: Landing
 
             <div className="rounded-2xl border border-[#30363d] bg-[#161b22] p-6 shadow-xl">
               <div className="text-sm font-bold text-white">Simulated Monthly Outcomes</div>
-              <div className="mt-1 text-xs text-[#8b949e]">Calculated client-side using FinSight's device financial engine</div>
+              <div className="mt-1 text-xs text-[#8b949e]">Illustrative client-side calculation; these are sample assumptions.</div>
 
               <div className="mt-6 grid grid-cols-2 gap-4">
                 <div className="rounded-xl border border-[#30363d] bg-[#0d1117] p-4">

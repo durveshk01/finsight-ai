@@ -17,6 +17,12 @@ password_hash = PasswordHash.recommended()
 bearer = HTTPBearer(auto_error=False)
 
 
+def validate_security_settings() -> None:
+    production = os.getenv("APP_ENV", "development").lower() == "production" or os.getenv("RENDER", "").lower() == "true"
+    if production and (SECRET_KEY == "local-development-secret-change-before-deploy" or len(SECRET_KEY.encode()) < 32):
+        raise RuntimeError("Production requires a private JWT_SECRET of at least 32 bytes")
+
+
 def hash_password(password: str) -> str:
     return password_hash.hash(password)
 
@@ -59,4 +65,3 @@ def user_business(user: User, db: Session, business_id: int | None) -> Business:
     if not business:
         raise HTTPException(404, "No business workspace found")
     return business
-

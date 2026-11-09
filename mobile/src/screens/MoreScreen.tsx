@@ -1,172 +1,28 @@
 import React from "react";
-import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, SafeAreaView, StatusBar
-} from "react-native";
-import {
-  FileText, Sliders, RefreshCw, Download, Settings,
-  ChevronRight, Shield, Database, Users
-} from "lucide-react-native";
+import { Alert, Text } from "react-native";
+import { CompositeScreenProps } from "@react-navigation/native";
+import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
+import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { Button, Card, Heading, Notice, Screen, s, useAction } from "../components/ui";
+import { useWorkspace } from "../context/WorkspaceContext";
+import { MainTabParamList, RootStackParamList } from "../navigation/RootNavigator";
 
-export function MoreScreen({ navigation }: any) {
-  const menuItems = [
-    {
-      id: "invoices",
-      title: "Invoices & AR / AP Ageing",
-      subtitle: "Customer receivables, supplier bills & ageing buckets",
-      icon: FileText,
-      color: "#3fb950",
-      screen: "Invoices",
-    },
-    {
-      id: "simulator",
-      title: "What-If Scenario Sandbox",
-      subtitle: "Simulate revenue growth, hiring, and capex locally",
-      icon: Sliders,
-      color: "#58a6ff",
-      screen: "Simulator",
-    },
-    {
-      id: "sync",
-      title: "Cloud Sync & Offline Queue",
-      subtitle: "View pending drafts, sync status, and sequence cursor",
-      icon: RefreshCw,
-      color: "#d29922",
-      screen: "Sync",
-    },
-    {
-      id: "reports",
-      title: "Financial Reports & Exports",
-      subtitle: "PDF, Excel workbook, and CSV downloads",
-      icon: Download,
-      color: "#a371f7",
-      screen: "Reports",
-    },
-  ];
+type Props = CompositeScreenProps<BottomTabScreenProps<MainTabParamList, "More">, NativeStackScreenProps<RootStackParamList>>;
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0d1117" />
-      <ScrollView contentContainerStyle={styles.scroll}>
-        <Text style={styles.title}>Workspace Tools</Text>
-        <Text style={styles.subtitle}>Treasury, synchronization, and scenario management</Text>
-
-        <View style={styles.menuCard}>
-          {menuItems.map((item, index) => {
-            const Icon = item.icon;
-            return (
-              <TouchableOpacity
-                key={item.id}
-                style={[styles.menuRow, index !== menuItems.length - 1 && styles.borderBottom]}
-                onPress={() => navigation.navigate(item.screen)}
-              >
-                <View style={[styles.iconBox, { backgroundColor: `${item.color}15` }]}>
-                  <Icon size={18} color={item.color} />
-                </View>
-                <View style={styles.textContainer}>
-                  <Text style={styles.itemTitle}>{item.title}</Text>
-                  <Text style={styles.itemSubtitle}>{item.subtitle}</Text>
-                </View>
-                <ChevronRight size={18} color="#8b949e" />
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        {/* Device-Powered Architecture Note */}
-        <View style={styles.infoCard}>
-          <View style={styles.infoRow}>
-            <Database size={16} color="#3fb950" />
-            <Text style={styles.infoTitle}>Device-Powered Architecture</Text>
-          </View>
-          <Text style={styles.infoBody}>
-            FinSight AI runs computations locally on this phone to give you sub-millisecond responsiveness. Central financial records stay synchronized with Render PostgreSQL when connected.
-          </Text>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
-  );
+export function MoreScreen({ navigation }: Props) {
+  const { session, syncing, signOut } = useWorkspace();
+  const action = useAction();
+  if (!session) return null;
+  const logout = () => Alert.alert(session.mode === "local" ? "Close local workspace?" : "Sign out?", "Your workspace records remain on this device. Local workspaces can be resumed; cloud records require signing into the same account again.", [{ text: "Cancel", style: "cancel" }, { text: "Sign out", onPress: () => void action.run(signOut) }]);
+  return <Screen>
+    <Heading title="Workspace tools" subtitle={`${session.user.name} · ${session.mode === "local" ? "Local owner" : session.role}`} />
+    <Card><Button title="Invoices & ageing" testID="open-invoices" variant="secondary" onPress={() => navigation.navigate("Invoices")} /><Text style={s.muted}>Customer invoices, supplier bills, actual due dates, and partial payments.</Text></Card>
+    <Card><Button title="Scenario sandbox" testID="open-simulator" variant="secondary" onPress={() => navigation.navigate("Simulator")} /><Text style={s.muted}>Explore cash flow, growth, capital costs, and payment delays.</Text></Card>
+    <Card><Button title="Cloud sync & offline queue" testID="open-sync" variant="secondary" onPress={() => navigation.navigate("Sync")} /><Text style={s.muted}>Connection status, acknowledged cursor, and pending changes.</Text></Card>
+    <Card><Button title="Reports & exports" testID="open-reports" variant="secondary" onPress={() => navigation.navigate("Reports")} /><Text style={s.muted}>Cash-basis summaries, PDF, Excel, CSV, and portable backups.</Text></Card>
+    <Card><Button title="Workspace settings & accounts" testID="open-settings" variant="secondary" onPress={() => navigation.navigate("Settings")} /><Text style={s.muted}>Opening cash, reserve target, currency, and transfer accounts.</Text></Card>
+    {action.error ? <Notice error text={action.error} /> : null}
+    <Button title={session.mode === "local" ? "Close workspace" : "Sign out"} testID="sign-out" variant="secondary" disabled={syncing} busy={action.busy} onPress={logout} />
+    <Text style={s.muted}>FinSight AI 1.1.0 · calculations run on your device. Cloud data is sent only to the API you configure. Local app data is protected by the OS sandbox; bearer tokens use the device keystore.</Text>
+  </Screen>;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#0d1117",
-  },
-  scroll: {
-    padding: 16,
-    paddingBottom: 32,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#ffffff",
-  },
-  subtitle: {
-    fontSize: 11,
-    color: "#8b949e",
-    marginTop: 2,
-    marginBottom: 20,
-  },
-  menuCard: {
-    backgroundColor: "#161b22",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    overflow: "hidden",
-    marginBottom: 20,
-  },
-  menuRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 16,
-  },
-  borderBottom: {
-    borderBottomWidth: 1,
-    borderBottomColor: "#30363d",
-  },
-  iconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 14,
-  },
-  textContainer: {
-    flex: 1,
-    marginRight: 8,
-  },
-  itemTitle: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#ffffff",
-  },
-  itemSubtitle: {
-    fontSize: 11,
-    color: "#8b949e",
-    marginTop: 2,
-  },
-  infoCard: {
-    backgroundColor: "#161b22",
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#30363d",
-    padding: 16,
-  },
-  infoRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 6,
-  },
-  infoTitle: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#3fb950",
-  },
-  infoBody: {
-    fontSize: 11,
-    color: "#8b949e",
-    lineHeight: 17,
-  },
-});

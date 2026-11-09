@@ -25,3 +25,16 @@ backend/htmlcov/
 Thumbs.db
 .qwen/
 .expo/
+
+.vercel
+mobile/android/
+mobile/ios/
+mobile/assets/*.png
+mobile/dist/
+mobile/artifacts/
+mobile/.signing/
+.gradle/
+*.jks
+*.keystore
+*.apk
+*.aab

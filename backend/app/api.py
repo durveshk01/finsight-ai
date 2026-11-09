@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import hashlib
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -11,7 +12,9 @@ from pathlib import Path
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, case, func, or_, select
+from pydantic import ValidationError
+from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import get_db
@@ -31,7 +34,16 @@ def _business(user: User, db: Session, business_id: int | None) -> Business:
     return user_business(user, db, business_id)
 
 
+def _lock_business(db: Session, business: Business) -> None:
+    # All financial writers acquire this tenant lock first. A no-op UPDATE also
+    # reserves SQLite's writer lock, unlike SELECT FOR UPDATE (ignored there).
+    db.execute(update(Business).where(Business.id == business.id).values(sync_seq=Business.sync_seq),
+               execution_options={"synchronize_session": False})
+    db.refresh(business)
+
+
 def _require_write_access(user: User, db: Session, business: Business) -> None:
+    _lock_business(db, business)
     role = _membership_role(user, db, business)
     if role not in {"owner", "admin", "accountant"}:
         raise HTTPException(403, "This workspace role can view financial data but cannot make changes")
@@ -43,6 +55,7 @@ def _membership_role(user: User, db: Session, business: Business) -> str | None:
 
 
 def _require_owner(user: User, db: Session, business: Business) -> None:
+    _lock_business(db, business)
     if _membership_role(user, db, business) != "owner":
         raise HTTPException(403, "Only workspace owners can manage team access")
 
@@ -90,6 +103,8 @@ def _owned_account(db: Session, business: Business, account_id: int | None) -> A
                                                Account.is_active.is_(True)))
     if not account:
         raise HTTPException(404, "Account not found in this business")
+    if account.currency != business.currency:
+        raise HTTPException(422, "Account currency must match the workspace; currency conversion is not supported")
     return account
 
 
@@ -129,15 +144,16 @@ def _serialize_transaction(t: Transaction) -> dict:
             "amount": float(t.amount), "date": t.date.isoformat(), "description": t.description,
             "payment_method": t.payment_method, "status": t.status, "reference": t.reference,
             "account_id": t.account_id, "to_account_id": getattr(t, "to_account_id", None),
-            "category_id": t.category_id,
+            "category_id": t.category_id, "invoice_id": t.invoice_id,
             "created_at": t.created_at.isoformat() if t.created_at else None}
 
 
 def _record_sync_change(db: Session, business: Business, entity_type: str, entity_id: int, action: str, detail: dict, client_mutation_id: str | None = None) -> SyncChange:
-    max_seq = db.scalar(select(func.coalesce(func.max(SyncChange.seq_num), 0)).where(SyncChange.business_id == business.id)) or 0
+    seq = db.execute(update(Business).where(Business.id == business.id)
+                     .values(sync_seq=Business.sync_seq + 1).returning(Business.sync_seq)).scalar_one()
     change = SyncChange(
         business_id=business.id,
-        seq_num=max_seq + 1,
+        seq_num=seq,
         entity_type=entity_type,
         entity_id=entity_id,
         action=action,
@@ -145,6 +161,7 @@ def _record_sync_change(db: Session, business: Business, entity_type: str, entit
         data_json=json.dumps(detail, default=str),
     )
     db.add(change)
+    db.flush()
     return change
 
 
@@ -153,6 +170,242 @@ def _audit(db: Session, user: User, business: Business, action: str, entity: str
                     detail_json=json.dumps(detail, default=str)))
     if entity_id is not None:
         _record_sync_change(db, business, entity, entity_id, action, detail, client_mutation_id)
+
+
+def _business_out(business: Business) -> dict:
+    return {"id": business.id, "name": business.name, "currency": business.currency,
+            "opening_cash": float(business.opening_cash), "minimum_reserve": float(business.minimum_reserve), "is_demo": business.is_demo}
+
+
+def _account_out(account: Account) -> dict:
+    return {"id": account.id, "name": account.name, "account_type": account.account_type,
+            "currency": account.currency, "opening_balance": float(account.opening_balance), "is_active": account.is_active}
+
+
+def _validated(model, data):
+    try:
+        return model.model_validate(data)
+    except ValidationError as error:
+        raise HTTPException(422, error.errors()[0]["msg"]) from None
+
+
+def _update_business_data(db: Session, user: User, business: Business, data: dict, mutation_id: str | None = None) -> dict:
+    if _membership_role(user, db, business) != "owner":
+        raise HTTPException(403, "Only workspace owners can change business settings")
+    payload = _validated(BusinessIn, {**_business_out(business), **data})
+    if payload.currency != business.currency and any(db.scalar(select(model.id).where(model.business_id == business.id).limit(1))
+                                                    for model in (Transaction, Invoice, Account)):
+        raise HTTPException(409, "Currency cannot change after accounts or financial records have been created")
+    for key, value in payload.model_dump().items():
+        setattr(business, key, value)
+    db.flush()
+    record = _business_out(business)
+    _audit(db, user, business, "update", "business", business.id, record, mutation_id)
+    return record
+
+
+def _save_transaction(db: Session, user: User, business: Business, payload: TransactionIn,
+                      row: Transaction | None = None, mutation_id: str | None = None) -> Transaction:
+    if row and db.scalar(select(Payment.id).where(Payment.transaction_id == row.id)):
+        raise HTTPException(409, "Invoice payments cannot be edited as ordinary ledger entries")
+    if payload.status == "completed" and payload.date > date.today():
+        raise HTTPException(422, "Use scheduled status for future transactions")
+    _owned_account(db, business, payload.account_id)
+    _owned_account(db, business, payload.to_account_id)
+    if payload.kind == "transfer" and (payload.account_id is None or payload.to_account_id is None or payload.account_id == payload.to_account_id):
+        raise HTTPException(422, "A transfer requires two different accounts in this workspace")
+    if payload.kind != "transfer" and payload.to_account_id is not None:
+        raise HTTPException(422, "A destination account is only valid for transfers")
+    category = _ensure_category(db, business, payload.kind, payload.category)
+    before = _serialize_transaction(row) if row else None
+    if row is None:
+        row = Transaction(business_id=business.id, category_id=category.id, **payload.model_dump())
+        db.add(row)
+    else:
+        for key, value in payload.model_dump().items():
+            setattr(row, key, value)
+        row.category_id = category.id
+    db.flush()
+    after = _serialize_transaction(row)
+    _audit(db, user, business, "update" if before else "create", "transaction", row.id,
+           {"before": before, "after": after} if before else after, mutation_id)
+    return row
+
+
+def _save_invoice(db: Session, user: User, business: Business, payload: InvoiceIn,
+                  row: Invoice | None = None, mutation_id: str | None = None) -> Invoice:
+    duplicate = db.scalar(select(Invoice.id).where(Invoice.business_id == business.id,
+                          func.lower(Invoice.invoice_number) == payload.invoice_number.lower(), Invoice.id != (row.id if row else -1)))
+    if duplicate:
+        raise HTTPException(409, "This invoice number already exists in the workspace")
+    _owned_account(db, business, payload.account_id)
+    if (payload.currency or business.currency).upper() != business.currency:
+        raise HTTPException(422, "Invoice currency must match the workspace; currency conversion is not supported")
+    previous_direction = row.direction if row else None
+    if row and (payload.amount < row.amount_paid or (row.amount_paid > 0 and payload.direction != row.direction)):
+        raise HTTPException(409, "A paid invoice cannot change direction or be reduced below its payments")
+    kind = "income" if payload.direction == "receivable" else "expense"
+    category = payload.category or ("Other Income" if kind == "income" else "Other Expenses")
+    _ensure_category(db, business, kind, category)
+    created = row is None
+    if created:
+        row = Invoice(business_id=business.id, amount_paid=Decimal("0"))
+        db.add(row)
+    for key, value in payload.model_dump(exclude={"currency", "category"}).items():
+        setattr(row, key, value)
+    row.currency = business.currency
+    row.category = category
+    row.status = "paid" if row.amount_paid == row.amount else "partially_paid" if row.amount_paid > 0 else "open"
+    db.flush()
+    if previous_direction and previous_direction != row.direction:
+        old_model = Receivable if previous_direction == "receivable" else Payable
+        old_detail = db.scalar(select(old_model).where(old_model.invoice_id == row.id))
+        if old_detail:
+            db.delete(old_detail)
+    model = Receivable if row.direction == "receivable" else Payable
+    detail = db.scalar(select(model).where(model.invoice_id == row.id))
+    if detail is None:
+        detail = model(business_id=business.id, invoice_id=row.id)
+        db.add(detail)
+    detail.amount, detail.amount_paid, detail.due_date, detail.status = row.amount, row.amount_paid, row.due_date, row.status
+    _audit(db, user, business, "create" if created else "update", "invoice", row.id, _invoice_out(row), mutation_id)
+    return row
+
+
+def _delete_invoice(db: Session, user: User, business: Business, row: Invoice, mutation_id: str | None = None) -> None:
+    if row.amount_paid > 0 or db.scalar(select(Payment.id).where(Payment.invoice_id == row.id)):
+        raise HTTPException(409, "An invoice with payments cannot be deleted")
+    _audit(db, user, business, "delete", "invoice", row.id, _invoice_out(row), mutation_id)
+    for model in (Receivable, Payable):
+        detail = db.scalar(select(model).where(model.invoice_id == row.id))
+        if detail:
+            db.delete(detail)
+    db.delete(row)
+    db.flush()
+
+
+def _settle_invoice(db: Session, user: User, business: Business, invoice_id: int, payload: InvoicePaymentIn,
+                    mutation_id: str | None = None) -> dict:
+    invoice = db.scalar(select(Invoice).where(Invoice.id == invoice_id, Invoice.business_id == business.id))
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if payload.paid_on > date.today():
+        raise HTTPException(422, "A settled payment date cannot be in the future")
+    if invoice.currency != business.currency:
+        raise HTTPException(422, "Foreign-currency settlement is not supported")
+    if payload.amount > _decimal(invoice.amount - invoice.amount_paid):
+        raise HTTPException(422, "Payment exceeds the outstanding invoice balance")
+    account_id = payload.account_id if payload.account_id is not None else invoice.account_id
+    _owned_account(db, business, account_id)
+    kind = "income" if invoice.direction == "receivable" else "expense"
+    category = _ensure_category(db, business, kind, invoice.category)
+    transaction = Transaction(business_id=business.id, category_id=category.id, account_id=account_id, kind=kind,
+        category=invoice.category, amount=payload.amount, date=payload.paid_on, description=f"Invoice {invoice.invoice_number}: {invoice.counterparty}",
+        payment_method=payload.payment_method, status="completed", reference=payload.reference or invoice.invoice_number)
+    db.add(transaction)
+    db.flush()
+    payment = Payment(business_id=business.id, invoice_id=invoice.id, transaction_id=transaction.id, account_id=account_id,
+        amount=payload.amount, paid_on=payload.paid_on, payment_method=payload.payment_method, reference=payload.reference)
+    db.add(payment)
+    transaction.payment = payment
+    invoice.amount_paid = _decimal(invoice.amount_paid + payload.amount)
+    invoice.status = "paid" if invoice.amount_paid == invoice.amount else "partially_paid"
+    model = Receivable if invoice.direction == "receivable" else Payable
+    detail = db.scalar(select(model).where(model.invoice_id == invoice.id))
+    if detail is None:
+        detail = model(business_id=business.id, invoice_id=invoice.id, amount=invoice.amount, due_date=invoice.due_date)
+        db.add(detail)
+    detail.amount_paid, detail.status = invoice.amount_paid, invoice.status
+    db.flush()
+    record = {"id": payment.id, "invoice_id": invoice.id, "transaction_id": transaction.id, "amount": float(payment.amount),
+              "paid_on": payment.paid_on.isoformat(), "account_id": account_id, "payment_method": payment.payment_method, "reference": payment.reference}
+    _audit(db, user, business, "create", "transaction", transaction.id, _serialize_transaction(transaction))
+    _audit(db, user, business, "update", "invoice", invoice.id, _invoice_out(invoice))
+    _audit(db, user, business, "create", "payment", payment.id, record, mutation_id)
+    return {"invoice": _invoice_out(invoice), "payment": record, "transaction": _serialize_transaction(transaction)}
+
+
+def _apply_sync_mutation(db: Session, user: User, business: Business, mutation: SyncMutation) -> dict:
+    entity_id = mutation.entity_id
+    if mutation.action == "create" and entity_id is not None:
+        raise HTTPException(422, "Create mutations must not specify a saved entity ID")
+    if mutation.action != "create" and (entity_id is None or entity_id <= 0):
+        raise HTTPException(422, "A saved server entity ID is required")
+    record = None
+    extra = {}
+    if mutation.entity_type == "transaction":
+        row = db.scalar(select(Transaction).where(Transaction.id == entity_id, Transaction.business_id == business.id)) if entity_id else None
+        if mutation.action == "delete":
+            if row and db.scalar(select(Payment.id).where(Payment.transaction_id == row.id)):
+                raise HTTPException(409, "Invoice payments cannot be deleted as ordinary ledger entries")
+            _audit(db, user, business, "delete", "transaction", entity_id, {"id": entity_id}, mutation.client_mutation_id)
+            if row:
+                db.delete(row)
+                db.flush()
+        else:
+            if mutation.action == "update" and row is None:
+                raise HTTPException(404, "Transaction not found")
+            payload = _validated(TransactionIn, {**(_serialize_transaction(row) if row else {}), **mutation.data})
+            row = _save_transaction(db, user, business, payload, row, mutation.client_mutation_id)
+            entity_id, record = row.id, _serialize_transaction(row)
+    elif mutation.entity_type == "invoice":
+        row = db.scalar(select(Invoice).where(Invoice.id == entity_id, Invoice.business_id == business.id)) if entity_id else None
+        if mutation.action == "delete":
+            if row:
+                _delete_invoice(db, user, business, row, mutation.client_mutation_id)
+            else:
+                _audit(db, user, business, "delete", "invoice", entity_id, {"id": entity_id}, mutation.client_mutation_id)
+        else:
+            if mutation.action == "update" and row is None:
+                raise HTTPException(404, "Invoice not found")
+            payload = _validated(InvoiceIn, {**(_invoice_out(row) if row else {}), **mutation.data})
+            row = _save_invoice(db, user, business, payload, row, mutation.client_mutation_id)
+            entity_id, record = row.id, _invoice_out(row)
+    elif mutation.entity_type == "account":
+        row = db.scalar(select(Account).where(Account.id == entity_id, Account.business_id == business.id)) if entity_id else None
+        if mutation.action != "create" and row is None:
+            raise HTTPException(404, "Account not found")
+        if mutation.action == "delete":
+            if any(db.scalar(select(model.id).where(model.account_id == row.id).limit(1)) for model in (Transaction, Invoice, Payment)) or db.scalar(select(Transaction.id).where(Transaction.to_account_id == row.id).limit(1)):
+                raise HTTPException(409, "An account with financial records cannot be deleted; deactivate it instead")
+            _audit(db, user, business, "delete", "account", row.id, _account_out(row), mutation.client_mutation_id)
+            db.delete(row)
+        else:
+            payload = _validated(AccountIn, {**(_account_out(row) if row else {}), **mutation.data})
+            if (payload.currency or business.currency).upper() != business.currency:
+                raise HTTPException(422, "Account currency must match the workspace")
+            if db.scalar(select(Account.id).where(Account.business_id == business.id, func.lower(Account.name) == payload.name.lower(), Account.id != (row.id if row else -1))):
+                raise HTTPException(409, "An account with this name already exists")
+            if row is None:
+                row = Account(business_id=business.id)
+                db.add(row)
+            for key, value in payload.model_dump().items():
+                setattr(row, key, value)
+            row.currency = business.currency
+            active = mutation.data.get("is_active", row.is_active if row.is_active is not None else True)
+            if not isinstance(active, bool):
+                raise HTTPException(422, "is_active must be true or false")
+            row.is_active = active
+            db.flush()
+            entity_id, record = row.id, _account_out(row)
+            _audit(db, user, business, mutation.action, "account", row.id, record, mutation.client_mutation_id)
+    elif mutation.entity_type == "payment":
+        if mutation.action != "create":
+            raise HTTPException(422, "Payments support create only")
+        invoice_id = mutation.data.get("invoice_id")
+        if not isinstance(invoice_id, int) or invoice_id <= 0:
+            raise HTTPException(422, "A saved invoice ID is required")
+        settled = _settle_invoice(db, user, business, invoice_id, _validated(InvoicePaymentIn, mutation.data), mutation.client_mutation_id)
+        entity_id, record = settled["payment"]["id"], settled["payment"]
+        extra = {"invoice": settled["invoice"], "transaction": settled["transaction"]}
+    elif mutation.entity_type == "business":
+        if mutation.action != "update" or entity_id != business.id:
+            raise HTTPException(422, "Workspace settings support update for the selected workspace only")
+        record = _update_business_data(db, user, business, mutation.data, mutation.client_mutation_id)
+    else:
+        raise HTTPException(422, f"Offline sync does not support {mutation.entity_type} mutations")
+    return {"client_mutation_id": mutation.client_mutation_id, "entity_type": mutation.entity_type, "entity_id": entity_id,
+            "status": {"create": "created", "update": "updated", "delete": "deleted"}[mutation.action], "record": record, **extra}
 
 
 def _next_occurrence(value: date, frequency: str) -> date:
@@ -543,9 +796,7 @@ def remove_business_member(member_id: int, user: User = Depends(current_user), d
 def update_business(payload: dict, user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
     business = _business(user, db, x_business_id)
     _require_write_access(user, db, business)
-    for key in ("name", "currency", "minimum_reserve", "opening_cash"):
-        if key in payload:
-            setattr(business, key, payload[key])
+    _update_business_data(db, user, business, payload)
     db.commit()
     db.refresh(business)
     return business
@@ -591,13 +842,13 @@ def list_accounts(user: User = Depends(current_user), db: Session = Depends(get_
             (Transaction.kind == "expense", -1),
             else_=0)), 0)).where(
                 Transaction.business_id == business.id, Transaction.account_id == account.id,
-                Transaction.status == "completed")) or 0
+                 Transaction.status == "completed", Transaction.date <= date.today())) or 0
         transfers_in = db.scalar(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
             Transaction.business_id == business.id, Transaction.to_account_id == account.id,
-            Transaction.kind == "transfer", Transaction.status == "completed")) or 0
+            Transaction.kind == "transfer", Transaction.status == "completed", Transaction.date <= date.today())) or 0
         transfers_out = db.scalar(select(func.coalesce(func.sum(Transaction.amount), 0)).where(
             Transaction.business_id == business.id, Transaction.account_id == account.id,
-            Transaction.kind == "transfer", Transaction.status == "completed")) or 0
+            Transaction.kind == "transfer", Transaction.status == "completed", Transaction.date <= date.today())) or 0
         current_bal = account.opening_balance + Decimal(str(net_direct)) + Decimal(str(transfers_in)) - Decimal(str(transfers_out))
         results.append({"id": account.id, "name": account.name, "account_type": account.account_type,
                         "currency": account.currency, "opening_balance": float(account.opening_balance),
@@ -612,11 +863,15 @@ def create_account(payload: AccountIn, user: User = Depends(current_user), db: S
     business = _business(user, db, x_business_id)
     _require_write_access(user, db, business)
     currency = (payload.currency or business.currency).upper()
-    if db.scalar(select(Account.id).where(Account.business_id == business.id, Account.name == payload.name.strip())):
+    if currency != business.currency:
+        raise HTTPException(422, "Account currency must match the workspace")
+    if db.scalar(select(Account.id).where(Account.business_id == business.id, func.lower(Account.name) == payload.name.strip().lower())):
         raise HTTPException(409, "An account with this name already exists")
     account = Account(business_id=business.id, name=payload.name.strip(), account_type=payload.account_type,
                       currency=currency, opening_balance=payload.opening_balance)
     db.add(account)
+    db.flush()
+    _audit(db, user, business, "create", "account", account.id, _account_out(account))
     db.commit()
     db.refresh(account)
     return {"id": account.id, "name": account.name, "account_type": account.account_type,
@@ -636,6 +891,8 @@ def update_account(account_id: int, payload: dict, user: User = Depends(current_
         if not isinstance(payload["is_active"], bool):
             raise HTTPException(422, "is_active must be true or false")
         account.is_active = payload["is_active"]
+    db.flush()
+    _audit(db, user, business, "update", "account", account.id, _account_out(account))
     db.commit()
     return {"id": account.id, "name": account.name, "account_type": account.account_type,
             "currency": account.currency, "opening_balance": float(account.opening_balance), "is_active": account.is_active}
@@ -664,30 +921,36 @@ def create_invoice(payload: InvoiceIn, user: User = Depends(current_user), db: S
                    x_business_id: int | None = Header(default=None)):
     business = _business(user, db, x_business_id)
     _require_write_access(user, db, business)
-    if db.scalar(select(Invoice.id).where(Invoice.business_id == business.id,
-                                         Invoice.invoice_number == payload.invoice_number.strip())):
-        raise HTTPException(409, "This invoice number already exists in the workspace")
-    _owned_account(db, business, payload.account_id)
-    kind = "income" if payload.direction == "receivable" else "expense"
-    category = payload.category or ("Other Income" if kind == "income" else "Other Expenses")
-    _ensure_category(db, business, kind, category)
-    invoice = Invoice(business_id=business.id, account_id=payload.account_id, direction=payload.direction,
-                      invoice_number=payload.invoice_number.strip(), counterparty=payload.counterparty.strip(),
-                      issue_date=payload.issue_date, due_date=payload.due_date, amount=payload.amount,
-                      amount_paid=Decimal("0"), currency=(payload.currency or business.currency).upper(),
-                      category=category, status="open", description=payload.description)
-    db.add(invoice)
-    db.flush()
-    if payload.direction == "receivable":
-        db.add(Receivable(business_id=business.id, invoice_id=invoice.id, amount=invoice.amount,
-                          amount_paid=Decimal("0"), due_date=invoice.due_date, status="open"))
-    else:
-        db.add(Payable(business_id=business.id, invoice_id=invoice.id, amount=invoice.amount,
-                       amount_paid=Decimal("0"), due_date=invoice.due_date, status="open"))
-    _audit(db, user, business, "create", "invoice", invoice.id, _invoice_out(invoice))
+    invoice = _save_invoice(db, user, business, payload)
     db.commit()
     db.refresh(invoice)
     return _invoice_out(invoice)
+
+
+@router.put("/invoices/{invoice_id}")
+def update_invoice(invoice_id: int, payload: InvoiceIn, user: User = Depends(current_user), db: Session = Depends(get_db),
+                   x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    _require_write_access(user, db, business)
+    invoice = db.scalar(select(Invoice).where(Invoice.id == invoice_id, Invoice.business_id == business.id))
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    invoice = _save_invoice(db, user, business, payload, invoice)
+    db.commit()
+    return _invoice_out(invoice)
+
+
+@router.delete("/invoices/{invoice_id}")
+def delete_invoice(invoice_id: int, user: User = Depends(current_user), db: Session = Depends(get_db),
+                   x_business_id: int | None = Header(default=None)):
+    business = _business(user, db, x_business_id)
+    _require_write_access(user, db, business)
+    invoice = db.scalar(select(Invoice).where(Invoice.id == invoice_id, Invoice.business_id == business.id))
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    _delete_invoice(db, user, business, invoice)
+    db.commit()
+    return {"deleted": True}
 
 
 @router.get("/invoices/{invoice_id}/payments")
@@ -708,42 +971,9 @@ def record_invoice_payment(invoice_id: int, payload: InvoicePaymentIn, user: Use
                            db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
     business = _business(user, db, x_business_id)
     _require_write_access(user, db, business)
-    invoice = db.scalar(select(Invoice).where(Invoice.id == invoice_id, Invoice.business_id == business.id))
-    if not invoice:
-        raise HTTPException(404, "Invoice not found")
-    if payload.paid_on > date.today():
-        raise HTTPException(422, "A settled payment date cannot be in the future")
-    amount_due = _decimal(invoice.amount - invoice.amount_paid)
-    if payload.amount > amount_due:
-        raise HTTPException(422, "Payment exceeds the outstanding invoice balance")
-    account_id = payload.account_id if payload.account_id is not None else invoice.account_id
-    _owned_account(db, business, account_id)
-    kind = "income" if invoice.direction == "receivable" else "expense"
-    category = _ensure_category(db, business, kind, invoice.category)
-    transaction = Transaction(business_id=business.id, category_id=category.id, account_id=account_id,
-                              kind=kind, category=invoice.category, amount=payload.amount, date=payload.paid_on,
-                              description=f"Invoice {invoice.invoice_number}: {invoice.counterparty}",
-                              payment_method=payload.payment_method, status="completed",
-                              reference=payload.reference or invoice.invoice_number)
-    db.add(transaction)
-    db.flush()
-    payment = Payment(business_id=business.id, invoice_id=invoice.id, transaction_id=transaction.id,
-                      account_id=account_id, amount=payload.amount, paid_on=payload.paid_on,
-                      payment_method=payload.payment_method, reference=payload.reference)
-    db.add(payment)
-    invoice.amount_paid = _decimal(invoice.amount_paid + payload.amount)
-    invoice.status = "paid" if invoice.amount_paid == invoice.amount else "partially_paid"
-    detail = db.scalar(select(Receivable if invoice.direction == "receivable" else Payable).where(
-        (Receivable if invoice.direction == "receivable" else Payable).invoice_id == invoice.id))
-    detail.amount_paid = invoice.amount_paid
-    detail.status = invoice.status
-    db.flush()
-    _audit(db, user, business, "create", "payment", payment.id, {"invoice_id": invoice.id,
-            "amount": str(payment.amount), "transaction_id": transaction.id})
+    result = _settle_invoice(db, user, business, invoice_id, payload)
     db.commit()
-    db.refresh(invoice)
-    return {"invoice": _invoice_out(invoice), "payment": {"id": payment.id, "transaction_id": transaction.id,
-            "amount": float(payment.amount), "paid_on": payment.paid_on.isoformat()}}
+    return result
 
 
 @router.get("/transactions")
@@ -777,18 +1007,7 @@ def list_transactions(user: User = Depends(current_user), db: Session = Depends(
 def create_transaction(payload: TransactionIn, user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
     business = _business(user, db, x_business_id)
     _require_write_access(user, db, business)
-    _owned_account(db, business, payload.account_id)
-    if payload.to_account_id is not None:
-        _owned_account(db, business, payload.to_account_id)
-    if payload.kind == "transfer":
-        if payload.account_id and payload.to_account_id and payload.account_id == payload.to_account_id:
-            raise HTTPException(422, "Transfer source and destination accounts must be different")
-    category = _ensure_category(db, business, payload.kind, payload.category)
-    values = payload.model_dump(exclude={"account_id", "to_account_id"})
-    row = Transaction(business_id=business.id, category_id=category.id, account_id=payload.account_id, to_account_id=payload.to_account_id, **values)
-    db.add(row)
-    db.flush()
-    _audit(db, user, business, "create", "transaction", row.id, _serialize_transaction(row))
+    row = _save_transaction(db, user, business, payload)
     db.commit()
     db.refresh(row)
     return _serialize_transaction(row)
@@ -801,21 +1020,7 @@ def update_transaction(transaction_id: int, payload: TransactionIn, user: User =
     row = db.scalar(select(Transaction).where(Transaction.id == transaction_id, Transaction.business_id == business.id))
     if not row:
         raise HTTPException(404, "Transaction not found")
-    before = _serialize_transaction(row)
-    _owned_account(db, business, payload.account_id)
-    if payload.to_account_id is not None:
-        _owned_account(db, business, payload.to_account_id)
-    if payload.kind == "transfer":
-        if payload.account_id and payload.to_account_id and payload.account_id == payload.to_account_id:
-            raise HTTPException(422, "Transfer source and destination accounts must be different")
-    category = _ensure_category(db, business, payload.kind, payload.category)
-    for key, value in payload.model_dump(exclude={"account_id", "to_account_id"}).items():
-        setattr(row, key, value)
-    row.category_id = category.id
-    row.account_id = payload.account_id
-    row.to_account_id = payload.to_account_id
-    db.flush()
-    _audit(db, user, business, "update", "transaction", row.id, {"before": before, "after": _serialize_transaction(row)})
+    row = _save_transaction(db, user, business, payload, row)
     db.commit()
     db.refresh(row)
     return _serialize_transaction(row)
@@ -841,6 +1046,10 @@ def bulk_transactions(payload: BulkTransactionIn, user: User = Depends(current_u
     business = _business(user, db, x_business_id)
     _require_write_access(user, db, business)
     rows = list(db.scalars(select(Transaction).where(Transaction.id.in_(payload.transaction_ids), Transaction.business_id == business.id)))
+    protected_ids = set(db.scalars(select(Payment.transaction_id).where(Payment.transaction_id.in_([row.id for row in rows]))))
+    skipped = len([row for row in rows if row.id in protected_ids])
+    if payload.action != "delete":
+        rows = [row for row in rows if row.id not in protected_ids]
     if payload.action == "delete":
         payment_tx_ids = set(db.scalars(select(Payment.transaction_id).where(Payment.transaction_id.in_([r.id for r in rows]))))
         deleted_count = 0
@@ -865,7 +1074,7 @@ def bulk_transactions(payload: BulkTransactionIn, user: User = Depends(current_u
             _audit(db, user, business, "update", "transaction", r.id, _serialize_transaction(r))
             updated_count += 1
         db.commit()
-        return {"action": "update_category", "affected": updated_count}
+        return {"action": "update_category", "affected": updated_count, "skipped": skipped}
     elif payload.action == "update_status":
         if not payload.status:
             raise HTTPException(422, "Status must be provided for update_status action")
@@ -1245,8 +1454,13 @@ def payables_ageing(user: User = Depends(current_user), db: Session = Depends(ge
 @router.post("/sync/pull")
 def sync_pull(payload: SyncPullIn, user: User = Depends(current_user), db: Session = Depends(get_db), x_business_id: int | None = Header(default=None)):
     business = _business(user, db, x_business_id)
-    latest_seq = db.scalar(select(func.coalesce(func.max(SyncChange.seq_num), 0)).where(SyncChange.business_id == business.id)) or 0
-    if payload.since_seq == 0:
+    _lock_business(db, business)
+    role = _membership_role(user, db, business)
+    if not role:
+        raise HTTPException(404, "Workspace access is no longer available")
+    latest_seq = business.sync_seq
+    metadata = {"business": _business_out(business), "role": role, "protocol_version": 2}
+    if payload.since_seq == 0 or payload.since_seq > latest_seq:
         txs = _transactions(db, business, statuses=("completed", "pending", "scheduled"))
         accounts = db.scalars(select(Account).where(Account.business_id == business.id)).all()
         categories = db.scalars(select(TransactionCategory).where(TransactionCategory.business_id == business.id)).all()
@@ -1254,6 +1468,7 @@ def sync_pull(payload: SyncPullIn, user: User = Depends(current_user), db: Sessi
         recurring = db.scalars(select(RecurringTransaction).where(RecurringTransaction.business_id == business.id)).all()
         scenarios = db.scalars(select(FinancialScenario).where(FinancialScenario.business_id == business.id)).all()
         return {
+            **metadata,
             "mode": "baseline",
             "latest_seq": latest_seq,
             "has_more": False,
@@ -1276,6 +1491,7 @@ def sync_pull(payload: SyncPullIn, user: User = Depends(current_user), db: Sessi
     items = changes[:payload.limit]
     new_seq = items[-1].seq_num if items else payload.since_seq
     return {
+        **metadata,
         "mode": "delta",
         "latest_seq": latest_seq,
         "has_more": has_more,
@@ -1304,114 +1520,36 @@ def sync_push(payload: SyncPushIn, user: User = Depends(current_user), db: Sessi
     applied = []
     conflicts = []
     for mutation in payload.mutations:
-        existing_change = db.scalar(
-            select(SyncChange).where(
-                SyncChange.business_id == business.id,
-                SyncChange.client_mutation_id == mutation.client_mutation_id,
-            )
-        )
-        if existing_change:
-            applied.append({
-                "client_mutation_id": mutation.client_mutation_id,
-                "status": "already_applied",
-                "entity_id": existing_change.entity_id,
-                "seq_num": existing_change.seq_num,
-            })
-            continue
-
         try:
-            if mutation.entity_type == "transaction":
-                if mutation.action == "create":
-                    cat = _ensure_category(db, business, mutation.data.get("kind", "expense"), mutation.data.get("category", "Other Expenses"))
-                    row = Transaction(
-                        business_id=business.id,
-                        category_id=cat.id,
-                        account_id=mutation.data.get("account_id"),
-                        to_account_id=mutation.data.get("to_account_id"),
-                        kind=mutation.data.get("kind", "expense"),
-                        category=cat.name,
-                        amount=_decimal(mutation.data.get("amount", 0)),
-                        date=date.fromisoformat(mutation.data.get("date", date.today().isoformat())),
-                        description=str(mutation.data.get("description", "")),
-                        payment_method=str(mutation.data.get("payment_method", "Bank transfer")),
-                        status=str(mutation.data.get("status", "completed")),
-                        reference=mutation.data.get("reference"),
-                    )
-                    db.add(row)
+            # Each change is atomic; a rejected row cannot poison the rest of a
+            # batch. The tenant lock serializes duplicate retries across workers.
+            with db.begin_nested():
+                digest = hashlib.sha256(json.dumps(mutation.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                existing = db.scalar(select(SyncChange).where(SyncChange.business_id == business.id,
+                                     SyncChange.client_mutation_id == mutation.client_mutation_id))
+                if existing:
+                    if existing.request_hash and existing.request_hash != digest:
+                        raise HTTPException(409, "This mutation ID was already used for a different change")
+                    record = json.loads(existing.data_json)
+                    acknowledgement = json.loads(existing.ack_json) if existing.ack_json else {
+                        "client_mutation_id": mutation.client_mutation_id, "entity_type": existing.entity_type,
+                        "entity_id": existing.entity_id, "record": record.get("after", record), "seq_num": existing.seq_num}
+                    acknowledgement["status"] = "already_applied"
+                else:
+                    acknowledgement = _apply_sync_mutation(db, user, business, mutation)
+                    change = db.scalar(select(SyncChange).where(SyncChange.business_id == business.id,
+                                       SyncChange.client_mutation_id == mutation.client_mutation_id))
+                    acknowledgement["seq_num"] = change.seq_num
+                    change.request_hash = digest
+                    change.ack_json = json.dumps(acknowledgement)
                     db.flush()
-                    _audit(db, user, business, "create", "transaction", row.id, _serialize_transaction(row), mutation.client_mutation_id)
-                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "created", "entity_id": row.id})
-                elif mutation.action == "update":
-                    row = db.scalar(select(Transaction).where(Transaction.id == mutation.entity_id, Transaction.business_id == business.id))
-                    if not row:
-                        conflicts.append({"client_mutation_id": mutation.client_mutation_id, "error": "Transaction not found"})
-                        continue
-                    if "amount" in mutation.data:
-                        row.amount = _decimal(mutation.data["amount"])
-                    if "description" in mutation.data:
-                        row.description = str(mutation.data["description"])
-                    if "status" in mutation.data:
-                        row.status = str(mutation.data["status"])
-                    if "category" in mutation.data:
-                        cat = _ensure_category(db, business, row.kind, mutation.data["category"])
-                        row.category = cat.name
-                        row.category_id = cat.id
-                    if "account_id" in mutation.data:
-                        row.account_id = mutation.data["account_id"]
-                    if "to_account_id" in mutation.data:
-                        row.to_account_id = mutation.data["to_account_id"]
-                    db.flush()
-                    _audit(db, user, business, "update", "transaction", row.id, _serialize_transaction(row), mutation.client_mutation_id)
-                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "updated", "entity_id": row.id})
-                elif mutation.action == "delete":
-                    row = db.scalar(select(Transaction).where(Transaction.id == mutation.entity_id, Transaction.business_id == business.id))
-                    if row:
-                        db.delete(row)
-                        db.flush()
-                        _audit(db, user, business, "delete", "transaction", mutation.entity_id, {"id": mutation.entity_id}, mutation.client_mutation_id)
-                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "deleted", "entity_id": mutation.entity_id})
-            elif mutation.entity_type == "invoice":
-                if mutation.action == "create":
-                    inv_direction = mutation.data.get("direction", "receivable")
-                    inv_category = mutation.data.get("category") or ("Sales Revenue" if inv_direction == "receivable" else "Other Expenses")
-                    row = Invoice(
-                        business_id=business.id,
-                        direction=inv_direction,
-                        invoice_number=str(mutation.data.get("invoice_number", f"INV-{int(datetime.now().timestamp())}")),
-                        counterparty=str(mutation.data.get("counterparty", "Client")),
-                        issue_date=date.fromisoformat(mutation.data.get("issue_date", date.today().isoformat())),
-                        due_date=date.fromisoformat(mutation.data.get("due_date", (date.today() + timedelta(days=30)).isoformat())),
-                        amount=_decimal(mutation.data.get("amount", 0)),
-                        amount_paid=_decimal(mutation.data.get("amount_paid", 0)),
-                        currency=str(mutation.data.get("currency", business.currency)).upper(),
-                        category=inv_category,
-                        account_id=mutation.data.get("account_id"),
-                        description=str(mutation.data.get("description", "")),
-                        status="paid" if _decimal(mutation.data.get("amount_paid", 0)) >= _decimal(mutation.data.get("amount", 0)) else "open"
-                    )
-                    db.add(row)
-                    db.flush()
-                    _audit(db, user, business, "create", "invoice", row.id, _invoice_out(row), mutation.client_mutation_id)
-                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "created", "entity_id": row.id})
-            elif mutation.entity_type == "account":
-                if mutation.action == "create":
-                    acc = Account(
-                        business_id=business.id,
-                        name=mutation.data.get("name", "Account").strip(),
-                        account_type=mutation.data.get("account_type", "bank"),
-                        currency=str(mutation.data.get("currency", business.currency)).upper(),
-                        opening_balance=_decimal(mutation.data.get("opening_balance", 0)),
-                    )
-                    db.add(acc)
-                    db.flush()
-                    _audit(db, user, business, "create", "account", acc.id, {"name": acc.name, "currency": acc.currency}, mutation.client_mutation_id)
-                    applied.append({"client_mutation_id": mutation.client_mutation_id, "status": "created", "entity_id": acc.id})
-        except Exception as e:
-            conflicts.append({"client_mutation_id": mutation.client_mutation_id, "error": str(e)})
-
+            applied.append(acknowledgement)
+        except HTTPException as error:
+            conflicts.append({"client_mutation_id": mutation.client_mutation_id, "error": str(error.detail)})
+        except IntegrityError:
+            conflicts.append({"client_mutation_id": mutation.client_mutation_id, "error": "A conflicting record already exists or a referenced record is unavailable"})
     db.commit()
-    latest_seq = db.scalar(select(func.coalesce(func.max(SyncChange.seq_num), 0)).where(SyncChange.business_id == business.id)) or 0
-    return {"applied": applied, "conflicts": conflicts, "latest_seq": latest_seq}
+    return {"applied": applied, "conflicts": conflicts, "latest_seq": business.sync_seq}
 
 
 @router.get("/sync/status")
@@ -1975,4 +2113,3 @@ def generate_report(payload: ReportIn, user: User = Depends(current_user), db: S
 @router.get("/health")
 def api_health():
     return {"status": "ok", "service": "finsight-api"}
-

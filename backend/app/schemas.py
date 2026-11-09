@@ -26,8 +26,22 @@ class UserOut(BaseModel):
 class BusinessIn(BaseModel):
     name: str = Field(min_length=2, max_length=180)
     currency: str = Field(default="INR", min_length=3, max_length=3)
-    opening_cash: Decimal = Decimal("0")
-    minimum_reserve: Decimal = Decimal("100000")
+    opening_cash: Decimal = Field(default=Decimal("0"), max_digits=16, decimal_places=2)
+    minimum_reserve: Decimal = Field(default=Decimal("100000"), ge=0, max_digits=16, decimal_places=2)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        if len(value.strip()) < 2:
+            raise ValueError("workspace name must contain at least two non-space characters")
+        return value.strip()
+
+    @field_validator("currency")
+    @classmethod
+    def clean_currency(cls, value: str) -> str:
+        if not value.isascii() or not value.isalpha():
+            raise ValueError("currency must be a three-letter currency code")
+        return value.upper()
 
 
 class BusinessOut(BusinessIn):
@@ -75,7 +89,7 @@ class BulkTransactionIn(BaseModel):
 
 class SyncMutation(BaseModel):
     client_mutation_id: str = Field(min_length=1, max_length=80)
-    entity_type: Literal["transaction", "account", "invoice", "recurring", "scenario", "category"]
+    entity_type: Literal["transaction", "account", "invoice", "payment", "business", "recurring", "scenario", "category"]
     action: Literal["create", "update", "delete"]
     entity_id: int | None = None
     data: dict = Field(default_factory=dict)
@@ -200,4 +214,3 @@ class ReportIn(BaseModel):
     report_type: Literal["financial_summary", "cash_flow", "revenue_analysis", "expense_analysis", "forecast", "risk", "scenario_comparison"] = "financial_summary"
     format: Literal["pdf", "xlsx", "csv"] = "pdf"
     months: int = Field(default=12, ge=1, le=36)
-

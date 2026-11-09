@@ -1,12 +1,10 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
-  AlertCircle, ArrowDownRight, ArrowUpRight, Check, CheckCircle2,
-  Clock, DollarSign, Download, Eye, FileText, Filter,
-  History, Layers, Plus, Printer, Search, ShieldAlert, X
+  AlertCircle, CheckCircle2, DollarSign, Plus, Printer, Search, X
 } from "lucide-react";
-import { Button, CardTitle, Field, inputClass } from "@/components/ui";
+import { Button, Field, inputClass } from "@/components/ui";
 
 export interface InvoiceItem {
   id: number;
@@ -49,15 +47,23 @@ export interface AccountOption {
 
 interface InvoicesManagerProps {
   code: string;
-  api: (path: string, init?: RequestInit) => Promise<any>;
+  api: (path: string, init?: RequestInit) => Promise<unknown>;
   accounts: AccountOption[];
   onRefreshSummary: () => void;
+}
+
+interface InvoicePayment {
+  id: number;
+  amount: number;
+  paid_on: string;
+  payment_method: string;
+  reference?: string | null;
 }
 
 export function InvoicesManager({ code, api, accounts, onRefreshSummary }: InvoicesManagerProps) {
   const [activeTab, setActiveTab] = useState<"receivables" | "payables" | "all">("receivables");
   const [invoices, setInvoices] = useState<InvoiceItem[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
   const [search, setSearch] = useState("");
@@ -70,7 +76,7 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
   // New Invoice Modal
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [newDirection, setNewDirection] = useState<"receivable" | "payable">("receivable");
-  const [newForm, setNewForm] = useState({
+  const [newForm, setNewForm] = useState(() => ({
     invoice_number: "",
     counterparty: "",
     amount: "",
@@ -79,7 +85,7 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
     category: "Sales Revenue",
     account_id: "",
     description: "",
-  });
+  }));
 
   // Payment Modal
   const [paymentModalInvoice, setPaymentModalInvoice] = useState<InvoiceItem | null>(null);
@@ -87,33 +93,40 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
   const [paymentAccount, setPaymentAccount] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("Bank transfer");
   const [paymentRef, setPaymentRef] = useState("");
-  const [paymentHistory, setPaymentHistory] = useState<any[]>([]);
+  const [paymentHistory, setPaymentHistory] = useState<InvoicePayment[]>([]);
 
   // Printable Invoice Modal
   const [printInvoice, setPrintInvoice] = useState<InvoiceItem | null>(null);
 
+  const fetchData = useCallback(() => Promise.all([
+    api("/api/invoices?limit=100"), api("/api/invoices/receivables/ageing"), api("/api/invoices/payables/ageing"),
+  ]), [api]);
+
+  const applyData = useCallback(([invRes, arRes, apRes]: unknown[]) => {
+    setInvoices(Array.isArray(invRes) ? invRes as InvoiceItem[] : (invRes as { items?: InvoiceItem[] } | null)?.items ?? []);
+    const ar = arRes as AgeingData | null;
+    const ap = apRes as AgeingData | null;
+    setArAgeing(ar?.buckets ? ar : null);
+    setApAgeing(ap?.buckets ? ap : null);
+  }, []);
+
   const loadData = async () => {
-    setLoading(true);
-    setError("");
     try {
-      const [invRes, arRes, apRes] = await Promise.all([
-        api("/api/invoices?limit=100"),
-        api("/api/invoices/receivables/ageing"),
-        api("/api/invoices/payables/ageing"),
-      ]);
-      setInvoices(invRes?.items ?? (Array.isArray(invRes) ? invRes : []));
-      setArAgeing(arRes && !Array.isArray(arRes) && arRes.buckets ? arRes : null);
-      setApAgeing(apRes && !Array.isArray(apRes) && apRes.buckets ? apRes : null);
-    } catch (err: any) {
-      setError(err.message || "Failed to load invoices");
+      applyData(await fetchData());
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load invoices");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    void loadData();
-  }, []);
+    let active = true;
+    fetchData().then((data) => { if (active) applyData(data); })
+      .catch((err: unknown) => { if (active) setError(err instanceof Error ? err.message : "Failed to load invoices"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [fetchData, applyData]);
 
   const handleCreateInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,6 +138,7 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
         body: JSON.stringify({
           ...newForm,
           direction: newDirection,
+          currency: code,
           amount: Number(newForm.amount),
           account_id: newForm.account_id ? Number(newForm.account_id) : null,
         }),
@@ -143,8 +157,8 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
       });
       await loadData();
       onRefreshSummary();
-    } catch (err: any) {
-      setError(err.message || "Failed to create invoice");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to create invoice");
     }
   };
 
@@ -155,7 +169,7 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
     setPaymentRef(`PAY-${inv.invoice_number}`);
     try {
       const history = await api(`/api/invoices/${inv.id}/payments`);
-      setPaymentHistory(history ?? []);
+      setPaymentHistory(Array.isArray(history) ? history as InvoicePayment[] : []);
     } catch {
       setPaymentHistory([]);
     }
@@ -180,8 +194,8 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
       setPaymentModalInvoice(null);
       await loadData();
       onRefreshSummary();
-    } catch (err: any) {
-      setError(err.message || "Failed to record payment");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to record payment");
     }
   };
 
@@ -365,10 +379,10 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--line)]">
-                  {((activeTab === "receivables" ? activeAgeing.customers : activeAgeing.suppliers) ?? []).map((cp: any, idx: number) => (
+                  {((activeTab === "receivables" ? activeAgeing.customers : activeAgeing.suppliers) ?? []).map((cp, idx) => (
                     <tr key={idx} className="hover:bg-[var(--background)]/60">
-                      <td className="py-2.5 font-semibold text-[var(--foreground)]">{cp.customer || cp.supplier}</td>
-                      <td className="py-2.5">{currencyFmt(cp.total_invoiced || cp.total_billed)}</td>
+                      <td className="py-2.5 font-semibold text-[var(--foreground)]">{"customer" in cp ? cp.customer : cp.supplier}</td>
+                      <td className="py-2.5">{currencyFmt("total_invoiced" in cp ? cp.total_invoiced : cp.total_billed)}</td>
                       <td className="py-2.5 text-emerald-600">{currencyFmt(cp.total_paid)}</td>
                       <td className="py-2.5 font-bold text-[var(--foreground)]">{currencyFmt(cp.amount_due)}</td>
                       <td className="py-2.5">
@@ -389,6 +403,7 @@ export function InvoicesManager({ code, api, accounts, onRefreshSummary }: Invoi
 
       {/* Invoices List Section */}
       <div className="card soft-shadow p-5 sm:p-6">
+        {loading && <p role="status" className="mb-3 text-xs text-[var(--muted)]">Loading invoices…</p>}
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="relative min-w-[220px] flex-1">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" />

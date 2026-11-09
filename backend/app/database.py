@@ -50,6 +50,9 @@ def _adopt_legacy_database(database_url: str) -> bool:
             metadata_tables = Base.metadata.tables
             metadata_tables["transaction_categories"].create(connection, checkfirst=True)
             metadata_tables["accounts"].create(connection, checkfirst=True)
+            business_columns = {column["name"] for column in inspect(connection).get_columns("businesses")}
+            if "sync_seq" not in business_columns:
+                connection.exec_driver_sql("ALTER TABLE businesses ADD COLUMN sync_seq BIGINT NOT NULL DEFAULT 0")
             transaction_columns = {column["name"] for column in inspect(connection).get_columns("transactions")}
             if "category_id" not in transaction_columns:
                 connection.exec_driver_sql(
@@ -133,25 +136,6 @@ def _adopt_legacy_database(database_url: str) -> bool:
         legacy_engine.dispose()
 
 
-def _ensure_schema_extensions(database_url: str) -> None:
-    from . import models as _models
-    ext_connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    ext_engine = create_engine(database_url, pool_pre_ping=True, connect_args=ext_connect_args)
-    try:
-        with ext_engine.begin() as connection:
-            Base.metadata.create_all(bind=connection)
-            tables = set(inspect(connection).get_table_names())
-            if "transactions" in tables:
-                cols = {c["name"] for c in inspect(connection).get_columns("transactions")}
-                if "to_account_id" not in cols:
-                    connection.exec_driver_sql(
-                        "ALTER TABLE transactions ADD COLUMN to_account_id INTEGER "
-                        "REFERENCES accounts(id) ON DELETE SET NULL"
-                    )
-    finally:
-        ext_engine.dispose()
-
-
 def migrate_database() -> None:
     backend_root = Path(__file__).resolve().parents[1]
     database_url = os.getenv("DATABASE_URL", DATABASE_URL)
@@ -163,11 +147,8 @@ def migrate_database() -> None:
     config.set_main_option("script_location", str(backend_root / "migrations").replace("%", "%%"))
     config.set_main_option("sqlalchemy.url", engine_url.replace("%", "%%"))
     if _adopt_legacy_database(engine_url):
-        command.stamp(config, "head")
-        _ensure_schema_extensions(engine_url)
-        return
+        command.stamp(config, "f3dd8e733358")
     command.upgrade(config, "head")
-    _ensure_schema_extensions(engine_url)
 
 
 class Base(DeclarativeBase):
@@ -180,4 +161,3 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
-

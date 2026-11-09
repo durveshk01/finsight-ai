@@ -10,6 +10,7 @@ from .api import router
 from .database import SessionLocal, migrate_database
 from .rate_limit import RateLimiter, RateLimitMiddleware
 from .seed import seed_demo
+from .security import validate_security_settings
 
 logger = logging.getLogger("finsight.startup")
 logger.setLevel(logging.INFO)
@@ -18,6 +19,7 @@ rate_limiter = RateLimiter(os.getenv("REDIS_URL"))
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    validate_security_settings()
     logger.info("Applying database migrations")
     migrate_database()
     logger.info("Database migrations complete")
@@ -31,7 +33,7 @@ async def lifespan(_app: FastAPI):
         await rate_limiter.close()
 
 
-app = FastAPI(title="FinSight AI API", version="1.0.0", description="Financial analytics, forecasting, and cash flow planning API", lifespan=lifespan)
+app = FastAPI(title="FinSight AI API", version="1.1.0", description="Financial analytics, forecasting, and cash flow planning API", lifespan=lifespan)
 app.state.rate_limiter = rate_limiter
 app.add_middleware(RateLimitMiddleware, limiter=rate_limiter)
 origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if origin.strip()]
@@ -42,4 +44,3 @@ app.include_router(router)
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "finsight-api"}
-
