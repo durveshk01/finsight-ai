@@ -128,6 +128,32 @@ class Device:
         self.shell("input keyevent 4")
         time.sleep(0.4)
 
+    def close_tool(self):
+        # Android Back can dismiss an IME or a closing modal instead of the stack.
+        self.tap_node(self.wait("Navigate up", timeout=30))
+        self.wait("tab-more", timeout=30)
+
+    def acquire_root(self):
+        # Restarting adbd can close its first connection on older emulator images.
+        deadline = time.monotonic() + 90
+        last_error = ""
+        while time.monotonic() < deadline:
+            try:
+                self.command("wait-for-device", timeout=15)
+                if self.shell("id -u").strip() == "0":
+                    return
+                self.command("root", timeout=15)
+                self.command("wait-for-device", timeout=15)
+                if self.shell("id -u").strip() == "0":
+                    return
+            except subprocess.SubprocessError as error:
+                details = getattr(error, "stderr", None) or getattr(error, "stdout", None) or b""
+                last_error = details.decode("utf-8", errors="replace") if isinstance(details, bytes) else str(details)
+                if "cannot run as root in production builds" in last_error:
+                    break
+            time.sleep(2)
+        raise AssertionError("Use a rootable default/google_apis emulator image. " + last_error.strip())
+
     def cash(self, expected):
         self.tap("tab-home")
         node = self.locate("current-cash", direction="up")
@@ -178,9 +204,7 @@ class Device:
 
 def run(device, apk):
     assert device.shell("getprop ro.kernel.qemu").strip() == "1", "Use a disposable Android emulator, not a physical device"
-    device.command("root")
-    device.command("wait-for-device")
-    assert device.shell("id -u").strip() == "0", "Use a rootable default/google_apis emulator image"
+    device.acquire_root()
     device.command("install", "-r", apk, timeout=180)
     package = device.shell(f"dumpsys package {PACKAGE}")
     assert "versionName=" + VERSION in package and "versionCode=2" in package
@@ -211,7 +235,7 @@ def run(device, apk):
     device.tap("add-account")
     device.fill("account-name", "Native bank")
     device.tap("save-account")
-    device.back()
+    device.close_tool()
     device.cash("1000.00")
 
     for kind, amount, description in [
@@ -256,7 +280,7 @@ def run(device, apk):
     invoice_due = device.locate("invoice-due-NATIVE-001")
     assert "150.40" in invoice_due.get("text", "")
     device.checkpoint("Overpayment rejected and partial payment posted once")
-    device.back()
+    device.close_tool()
     device.cash("1450.50")
 
     device.tap("tab-analytics")
@@ -271,12 +295,12 @@ def run(device, apk):
     projected = device.locate("scenario-closing-cash")
     assert re.sub(r"[^\d.-]", "", projected.get("text", "")) == "1500.90"
     device.checkpoint("Native scenario sandbox")
-    device.back()
+    device.close_tool()
     device.tool("open-sync")
     device.locate("intentionally local", contains=True)
     assert device.find("sync-now") is None, "Local mode must not offer a successful cloud sync"
     device.checkpoint("Local workspace reports truthful synchronization status")
-    device.back()
+    device.close_tool()
 
     device.tool("open-reports")
     imported = device.output / "native-import.csv"
@@ -307,7 +331,7 @@ def run(device, apk):
     assert len([transaction for transaction in snapshot["transactions"] if transaction.get("invoice_id")]) == 1
     assert snapshot["invoices"][0]["amount_due"] == 150.40
     assert "access_token" not in backup and "token" not in snapshot
-    device.back()
+    device.close_tool()
     device.cash("1475.65")
     device.checkpoint("PDF Excel CSV and JSON contain the actual financial records")
 
