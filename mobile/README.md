@@ -96,9 +96,9 @@ With a booted, rootable `default` or `google_apis` emulator (never a physical de
 python scripts/verify-android.py --serial emulator-5554 --apk artifacts/FinSight-AI-1.1.0.apk
 ```
 
-The verifier intentionally clears FinSight's emulator data, installs the signed APK, disables internet, creates named verification records through the UI, verifies transfers/payments and cash, generates and inspects native files/share sheets, picks CSV/JSON documents, edits/deletes/restores records, and checks restart/close/resume persistence. It stores screenshots, UI trees, files, logs, and `results.json` under `artifacts/verification/`.
+The verifier intentionally clears FinSight's emulator data, installs the signed APK, disables internet, creates named verification records through the UI, verifies transfers/payments and cash, generates and inspects native files/share sheets, picks CSV/JSON documents, edits/deletes/restores records, and checks restart/close/resume persistence. It stores screenshots, UI trees, files, logs, and `results.json` (including the tested APK's SHA-256) under `artifacts/verification/`.
 
-Jest rendering and mocked native-module tests are useful regression checks but are not proof of APK installation or physical-device compatibility. CI exercises the same signed artifact on Android API 29 and 35 x86_64 emulators. Physical arm64-device and live hosted-cloud checks must be identified separately when reporting a release's verification.
+Jest rendering and mocked native-module tests are useful regression checks but are not proof of APK installation or physical-device compatibility. CI checks the downloaded checksum and exercises the same signed artifact on Android API 29 and 35 AOSP x86_64 emulators with hardware keyboards. Physical arm64-device and live hosted-cloud checks must be identified separately when reporting a release's verification.
 
 The reusable native workflow also supports verification-only runs against an existing CI APK:
 

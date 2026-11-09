@@ -8,6 +8,7 @@ No Metro server, development build, injected app state, or mocked native modules
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import os
@@ -109,9 +110,12 @@ class Device:
         self.shell("input keyevent 123 " + delete)
         if value:
             self.shell("input text " + shlex.quote(str(value).replace(" ", "%s")))
-        # Back only when the IME is actually open; otherwise it would close a form.
-        if "mInputShown=true" in self.shell("dumpsys input_method"):
+        # mInputShown tracks the show request, even for a hidden hardware-keyboard
+        # input view. Back in that state backgrounds the app or closes its form.
+        ime = self.shell("dumpsys input_method")
+        if "mIsInputViewShown=true" in ime and "mDecorViewVisible=true" in ime:
             self.shell("input keyevent 4")
+            time.sleep(0.35)
 
     def choose(self, group, option):
         label = self.locate(group)
@@ -286,7 +290,12 @@ def run(device, apk):
     device.cash("1450.50")
 
     device.tap("tab-analytics")
-    device.wait("Analytics")
+    device.wait("Financial analytics")
+    device.locate("100.10", contains=True)
+    device.locate("1 transfers excluded", contains=True)
+    device.tap("Revenue")
+    device.locate("TOTAL RECORDED REVENUE")
+    device.locate("550.60", contains=True)
     device.checkpoint("Native financial analytics")
     device.tap("tab-forecasts")
     device.locate("Insufficient history for a statistical trend", contains=True)
@@ -386,7 +395,9 @@ def main():
     assert serial in available, "Select one booted emulator with --serial"
     args.output.mkdir(parents=True, exist_ok=True)
     device = Device(adb, serial, args.output)
-    result = {"version": VERSION, "serial": serial, "checks": device.checks, "passed": False}
+    result = {"version": VERSION, "serial": serial,
+              "apk_sha256": hashlib.sha256(args.apk.read_bytes()).hexdigest(),
+              "checks": device.checks, "passed": False}
     try:
         run(device, args.apk.resolve())
         errors = device.command("logcat", "-d", "-s", "ReactNativeJS:E", "AndroidRuntime:E")
