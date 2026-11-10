@@ -64,6 +64,10 @@ class Device:
     def find(self, value, contains=False, editable=False):
         for node in self.nodes():
             x1, y1, x2, y2 = self.bounds(node)
+            # Android 15 can expose a clipped field underneath its Home/taskbar
+            # control. Scroll fields fully into the form before tapping/typing.
+            if editable and (y1 < self.height * 0.08 or y2 > self.height * 0.88):
+                continue
             if x2 > x1 and y2 > y1 and self.matches(node, value, contains, editable):
                 return node
         return None
@@ -126,6 +130,15 @@ class Device:
     def tap(self, value, direction="down", twice=False):
         self.tap_node(self.locate(value, direction=direction), twice)
 
+    def confirm_alert(self, title, action):
+        # Android themes can uppercase button text. Target the native positive
+        # button, checking both the dialog title and its intended action.
+        dialog = self.wait("android:id/alertTitle", timeout=30)
+        assert dialog.get("text") == title, f"Unexpected native confirmation: {dialog.get('text')}"
+        button = self.wait("android:id/button1", timeout=30)
+        assert button.get("text", "").casefold() == action.casefold(), "Unexpected native confirmation action"
+        self.tap_node(button)
+
     def fill(self, label, value, direction="down"):
         node = self.locate(label, editable=True, direction=direction)
         self.tap_node(node)
@@ -133,6 +146,8 @@ class Device:
         self.shell("input keyevent 123 " + delete)
         if value:
             self.shell("input text " + shlex.quote(str(value).replace(" ", "%s")))
+            entered = self.wait(label, timeout=30).get("text", "")
+            assert entered == str(value), f"Native field {label} did not receive its intended value: {entered}"
         # mInputShown tracks the show request, even for a hidden hardware-keyboard
         # input view. Back in that state backgrounds the app or closes its form.
         ime = self.shell("dumpsys input_method")
@@ -404,19 +419,19 @@ def run(device, apk):
     device.tap("tab-transactions")
     device.tap("Edit Native expense")
     device.tap("Delete transaction")
-    device.tap("Delete")
+    device.confirm_alert("Delete transaction?", "Delete")
     device.cash("1575.75")
     device.checkpoint("Transaction editing and confirmed deletion recompute cash")
 
     device.tool("open-reports")
     device.pick_file("Open backup as local workspace", exports["json"])
-    device.tap("Open backup")
+    device.confirm_alert("Open backup locally?", "Open backup")
     device.wait("current-cash")
     device.cash("1475.65")
     device.checkpoint("Actual JSON document picker restores a separate local workspace")
     device.tap("tab-more")
     device.tap("sign-out")
-    device.tap("Sign out")
+    device.confirm_alert("Close local workspace?", "Sign out")
     device.wait("create-local-workspace")
     device.tap("Resume Native Verification")
     device.wait("current-cash")
