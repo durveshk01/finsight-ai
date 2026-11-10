@@ -61,6 +61,13 @@ class Device:
         attributes = [node.get("resource-id", ""), node.get("content-desc", ""), node.get("text", "")]
         return any(value in text if contains else value == text or text.endswith("/" + value) for text in attributes)
 
+    @staticmethod
+    def resumed_activity(activities):
+        # Android releases use both ':' and '=' in activity dumps, and newer
+        # share sheets live in com.android.intentresolver.
+        resumed = re.search(r"topResumedActivity\s*[:=]\s*(.*)", activities) or re.search(r"mResumedActivity\s*[:=]\s*(.*)", activities)
+        return resumed.group(1) if resumed else ""
+
     def find(self, value, contains=False, editable=False):
         for node in self.nodes():
             x1, y1, x2, y2 = self.bounds(node)
@@ -133,8 +140,8 @@ class Device:
     def confirm_alert(self, title, action):
         # Android themes can uppercase button text. Target the native positive
         # button, checking both the dialog title and its intended action.
-        dialog = self.wait("android:id/alertTitle", timeout=30)
-        assert dialog.get("text") == title, f"Unexpected native confirmation: {dialog.get('text')}"
+        dialog = self.wait(title, timeout=30)
+        assert dialog.get("package") == PACKAGE and dialog.get("text") == title, "Unexpected native confirmation"
         button = self.wait("android:id/button1", timeout=30)
         assert button.get("text", "").casefold() == action.casefold(), "Unexpected native confirmation action"
         self.tap_node(button)
@@ -223,12 +230,12 @@ class Device:
                       "csv": "text/csv", "json": "application/json"}
         while time.monotonic() < deadline:
             activities = self.shell("dumpsys activity activities")
-            if re.search(r"mResumedActivity:.*(?:ChooserActivity|ResolverActivity)", activities):
+            resumed = self.resumed_activity(activities)
+            if re.search(r"\b(?:ChooserActivity|ResolverActivity)(?:Launcher)?\b", resumed):
                 break
             # Android may auto-launch the sole share receiver instead of leaving
             # its chooser visible. Require the real ACTION_SEND with our file URI.
-            resumed = re.search(r"topResumedActivity=(.*)", activities) or re.search(r"mResumedActivity:(.*)", activities)
-            if resumed and PACKAGE not in resumed.group(1):
+            if resumed and PACKAGE not in resumed:
                 launches = self.command("logcat", "-d", "-s", "ActivityTaskManager:I", "ActivityManager:I")
                 if any("act=android.intent.action.SEND " in line and "typ=" + mime_types[extension] in line
                        and f"content://{PACKAGE}.SharingFileProvider/" in line
@@ -239,13 +246,13 @@ class Device:
             time.sleep(1)
         else:
             raise AssertionError(f"Native {extension} sharing did not open a resolver or hand off its file URI")
+        self.output.joinpath("native-sharing-activities-" + extension + ".log").write_text(activities, encoding="utf-8")
         self.nodes()
         self.checkpoint("Native " + extension.upper() + (" sharing handoff" if handoff else " share sheet"))
         for _ in range(4):
             self.back()
             activities = self.shell("dumpsys activity activities")
-            resumed = re.search(r"topResumedActivity=(.*)", activities) or re.search(r"mResumedActivity:(.*)", activities)
-            if resumed and PACKAGE in resumed.group(1):
+            if PACKAGE in self.resumed_activity(activities):
                 break
         else:
             raise AssertionError("Native sharing did not return to FinSight")
@@ -469,6 +476,8 @@ def main():
     except Exception as error:
         result["error"] = str(error)
         try:
+            args.output.joinpath("failure-activities.log").write_text(device.shell("dumpsys activity activities"), encoding="utf-8")
+            args.output.joinpath("failure-input-method.log").write_text(device.shell("dumpsys input_method"), encoding="utf-8")
             device.nodes()
             args.output.joinpath("failure.png").write_bytes(device.command("exec-out", "screencap", "-p", binary=True))
             args.output.joinpath("failure.xml").write_text(device.command("exec-out", "cat", "/sdcard/finsight-window.xml"), encoding="utf-8")
