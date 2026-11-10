@@ -31,6 +31,7 @@ class Device:
         self.serial = serial
         self.output = output
         self.checks = []
+        self.launcher_dialogs = 0
         self.width, self.height = 1080, 1920
 
     def command(self, *args, binary=False, timeout=90):
@@ -83,14 +84,36 @@ class Device:
                 self.swipe(travel)
         raise AssertionError(f"Native UI element not found: {value}")
 
-    def wait(self, value, contains=False, timeout=120):
+    def wait(self, value, contains=False, timeout=120, recover_launcher=False):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             node = self.find(value, contains)
             if node is not None:
                 return node
+            if recover_launcher:
+                self.close_launcher_dialog()
             time.sleep(1)
         raise AssertionError(f"Native UI did not display: {value}")
+
+    def close_launcher_dialog(self):
+        # Cold-boot launcher ANRs can cover an already running app. Recover only
+        # these known emulator launchers, only at startup, retaining the evidence.
+        nodes = self.nodes()
+        titles = {"Quickstep isn't responding", "Pixel Launcher isn't responding",
+                  "Launcher isn't responding", "Launcher3 isn't responding"}
+        title = next((node for node in nodes if node.get("resource-id") == "android:id/alertTitle"
+                      and node.get("text") in titles), None)
+        if title is None:
+            return
+        assert self.launcher_dialogs < 3, "Emulator launcher repeatedly failed during startup"
+        close = next((node for node in nodes if node.get("resource-id") == "android:id/aerr_close"), None)
+        assert close is not None, "Emulator launcher dialog has no Close app control"
+        self.launcher_dialogs += 1
+        prefix = self.output / f"emulator-launcher-dialog-{self.launcher_dialogs}"
+        prefix.with_suffix(".png").write_bytes(self.command("exec-out", "screencap", "-p", binary=True))
+        prefix.with_suffix(".xml").write_text(self.command("exec-out", "cat", "/sdcard/finsight-window.xml"), encoding="utf-8")
+        print("Recovered emulator startup dialog: " + title.get("text"), flush=True)
+        self.tap_node(close)
 
     def tap_node(self, node, twice=False):
         if node.get("enabled") == "false":
@@ -180,16 +203,38 @@ class Device:
     def export(self, extension):
         self.tap("export-" + extension)
         deadline = time.monotonic() + 120
+        handoff = False
+        mime_types = {"pdf": "application/pdf", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                      "csv": "text/csv", "json": "application/json"}
         while time.monotonic() < deadline:
             activities = self.shell("dumpsys activity activities")
             if re.search(r"mResumedActivity:.*(?:ChooserActivity|ResolverActivity)", activities):
                 break
+            # Android may auto-launch the sole share receiver instead of leaving
+            # its chooser visible. Require the real ACTION_SEND with our file URI.
+            resumed = re.search(r"topResumedActivity=(.*)", activities) or re.search(r"mResumedActivity:(.*)", activities)
+            if resumed and PACKAGE not in resumed.group(1):
+                launches = self.command("logcat", "-d", "-s", "ActivityTaskManager:I", "ActivityManager:I")
+                if any("act=android.intent.action.SEND " in line and "typ=" + mime_types[extension] in line
+                       and f"content://{PACKAGE}.SharingFileProvider/" in line
+                       and re.search(r"\." + extension + r"\b", line) for line in launches.splitlines()):
+                    self.output.joinpath("native-sharing-handoff-" + extension + ".log").write_text(launches, encoding="utf-8")
+                    handoff = True
+                    break
             time.sleep(1)
         else:
-            raise AssertionError(f"Native {extension} sharing did not open Android's share sheet")
+            raise AssertionError(f"Native {extension} sharing did not open a resolver or hand off its file URI")
         self.nodes()
-        self.checkpoint("Native " + extension.upper() + " share sheet")
-        self.back()
+        self.checkpoint("Native " + extension.upper() + (" sharing handoff" if handoff else " share sheet"))
+        for _ in range(4):
+            self.back()
+            activities = self.shell("dumpsys activity activities")
+            resumed = re.search(r"topResumedActivity=(.*)", activities) or re.search(r"mResumedActivity:(.*)", activities)
+            if resumed and PACKAGE in resumed.group(1):
+                break
+        else:
+            raise AssertionError("Native sharing did not return to FinSight")
+        self.wait("Navigate up", timeout=30)
         files = self.shell(f"find /data/user/0/{PACKAGE}/cache -type f").splitlines()
         matches = [file for file in files if file.endswith("." + extension) and
                    (extension == "pdf" or file.rsplit("/", 1)[-1].startswith("FinSight-"))]
@@ -225,7 +270,7 @@ def run(device, apk):
     sizes = re.findall(r"(\d+)x(\d+)", device.shell("wm size"))
     device.width, device.height = map(int, sizes[-1])
     device.shell(f"am start -W -n {PACKAGE}/.MainActivity")
-    device.wait("create-local-workspace", timeout=180)
+    device.wait("create-local-workspace", timeout=180, recover_launcher=True)
     device.tap("create-local-workspace")
     device.fill("owner-name", "Verification Owner")
     device.fill("workspace-name", "Native Verification")
@@ -417,6 +462,7 @@ def main():
             pass
         raise
     finally:
+        result["emulator_launcher_dialogs"] = device.launcher_dialogs
         args.output.joinpath("results.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 

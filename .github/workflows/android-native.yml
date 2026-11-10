@@ -34,8 +34,15 @@ jobs:
           APK_RUN_ID: ${{ inputs.apk-run-id }}
         shell: bash
         run: |
-          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID/jobs" --jq 'any(.jobs[]; .name == "android-build" and .conclusion == "success")')" = true
-          apk_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID" --jq .head_sha)
+          retry_gh_api() {
+            for attempt in 1 2 3; do
+              if gh api "$@"; then return 0; fi
+              sleep "$((attempt * 3))"
+            done
+            return 1
+          }
+          test "$(retry_gh_api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID/jobs" --jq 'any(.jobs[]; .name == "android-build" and .conclusion == "success")')" = true
+          apk_sha=$(retry_gh_api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID" --jq .head_sha)
           git fetch --no-tags --depth=1 origin "$apk_sha"
           git diff --exit-code "$apk_sha" HEAD -- mobile \
             ':!mobile/scripts/verify-android.py' ':!mobile/tests' ':!mobile/README.md' \
@@ -68,6 +75,7 @@ jobs:
           arch: x86_64
           target: default
           profile: pixel_2
+          cores: 4
           ram-size: 2048M
           heap-size: 256M
           enable-hw-keyboard: true
