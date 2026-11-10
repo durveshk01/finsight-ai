@@ -227,6 +227,7 @@ class Device:
     def export(self, extension):
         self.tap("export-" + extension)
         deadline = time.monotonic() + 120
+        handoff = False
         mime_types = {"pdf": "application/pdf", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                       "csv": "text/csv", "json": "application/json"}
         while time.monotonic() < deadline:
@@ -234,13 +235,19 @@ class Device:
             resumed = self.resumed_activity(activities)
             if re.search(r"\b(?:ChooserActivity|ResolverActivity)(?:Launcher)?\b", resumed):
                 break
+            # Android can auto-launch its sole matching receiver. Accept only our
+            # real receiver, then require the same URI, permission, and byte proof.
+            if RECEIVER in resumed:
+                handoff = True
+                break
             time.sleep(1)
         else:
-            raise AssertionError(f"Native {extension} sharing did not open Android's share sheet")
+            raise AssertionError(f"Native {extension} sharing did not open a chooser or deliver its file to the receiver")
         self.output.joinpath("native-sharing-activities-" + extension + ".log").write_text(activities, encoding="utf-8")
-        self.nodes()
-        self.checkpoint("Native " + extension.upper() + " share sheet")
-        self.tap("Verify export")
+        if not handoff:
+            self.nodes()
+            self.checkpoint("Native " + extension.upper() + " share sheet")
+            self.tap("Verify export")
         self.wait("Received " + extension.upper() + " export", timeout=60)
         metadata = self.output / ("native-sharing-receipt-" + extension + ".json")
         destination = self.output / ("native-export." + extension)
@@ -253,6 +260,9 @@ class Device:
         assert receipt["flags"] & 1, "Native sharing did not grant read access"
         assert receipt["bytes"] == destination.stat().st_size > 0
         assert receipt["sha256"] == hashlib.sha256(destination.read_bytes()).hexdigest(), "Received native export checksum mismatch"
+        if handoff:
+            self.nodes()
+            self.checkpoint("Native " + extension.upper() + " file sharing handoff")
         for _ in range(4):
             self.back()
             activities = self.shell("dumpsys activity activities")
