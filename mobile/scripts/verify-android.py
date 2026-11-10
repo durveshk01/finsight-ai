@@ -17,11 +17,13 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 import zipfile
 
 PACKAGE = "ai.finsight.mobile"
+RECEIVER = "ai.finsight.verification"
 VERSION = "1.1.0"
 
 
@@ -225,7 +227,6 @@ class Device:
     def export(self, extension):
         self.tap("export-" + extension)
         deadline = time.monotonic() + 120
-        handoff = False
         mime_types = {"pdf": "application/pdf", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                       "csv": "text/csv", "json": "application/json"}
         while time.monotonic() < deadline:
@@ -233,22 +234,25 @@ class Device:
             resumed = self.resumed_activity(activities)
             if re.search(r"\b(?:ChooserActivity|ResolverActivity)(?:Launcher)?\b", resumed):
                 break
-            # Android may auto-launch the sole share receiver instead of leaving
-            # its chooser visible. Require the real ACTION_SEND with our file URI.
-            if resumed and PACKAGE not in resumed:
-                launches = self.command("logcat", "-d", "-s", "ActivityTaskManager:I", "ActivityManager:I")
-                if any("act=android.intent.action.SEND " in line and "typ=" + mime_types[extension] in line
-                       and f"content://{PACKAGE}.SharingFileProvider/" in line
-                       and re.search(r"\." + extension + r"\b", line) for line in launches.splitlines()):
-                    self.output.joinpath("native-sharing-handoff-" + extension + ".log").write_text(launches, encoding="utf-8")
-                    handoff = True
-                    break
             time.sleep(1)
         else:
-            raise AssertionError(f"Native {extension} sharing did not open a resolver or hand off its file URI")
+            raise AssertionError(f"Native {extension} sharing did not open Android's share sheet")
         self.output.joinpath("native-sharing-activities-" + extension + ".log").write_text(activities, encoding="utf-8")
         self.nodes()
-        self.checkpoint("Native " + extension.upper() + (" sharing handoff" if handoff else " share sheet"))
+        self.checkpoint("Native " + extension.upper() + " share sheet")
+        self.tap("Verify export")
+        self.wait("Received " + extension.upper() + " export", timeout=60)
+        metadata = self.output / ("native-sharing-receipt-" + extension + ".json")
+        destination = self.output / ("native-export." + extension)
+        self.command("pull", f"/data/user/0/{RECEIVER}/files/received-{extension}.json", metadata)
+        self.command("pull", f"/data/user/0/{RECEIVER}/files/received.{extension}", destination)
+        receipt = json.loads(metadata.read_text(encoding="utf-8"))
+        assert receipt["schema"] == "finsight.native-share.v1" and receipt["action"] == "android.intent.action.SEND"
+        assert receipt["mime_type"] == mime_types[extension]
+        assert receipt["uri"].startswith(f"content://{PACKAGE}.SharingFileProvider/") and receipt["uri"].endswith("." + extension)
+        assert receipt["flags"] & 1, "Native sharing did not grant read access"
+        assert receipt["bytes"] == destination.stat().st_size > 0
+        assert receipt["sha256"] == hashlib.sha256(destination.read_bytes()).hexdigest(), "Received native export checksum mismatch"
         for _ in range(4):
             self.back()
             activities = self.shell("dumpsys activity activities")
@@ -257,12 +261,6 @@ class Device:
         else:
             raise AssertionError("Native sharing did not return to FinSight")
         self.wait("Navigate up", timeout=30)
-        files = self.shell(f"find /data/user/0/{PACKAGE}/cache -type f").splitlines()
-        matches = [file for file in files if file.endswith("." + extension) and
-                   (extension == "pdf" or file.rsplit("/", 1)[-1].startswith("FinSight-"))]
-        assert matches, f"Native {extension} export did not write a real file"
-        destination = self.output / ("native-export." + extension)
-        self.command("pull", matches[-1], destination)
         return destination
 
     def pick_file(self, button, source):
@@ -278,6 +276,12 @@ class Device:
 def run(device, apk):
     assert device.shell("getprop ro.kernel.qemu").strip() == "1", "Use a disposable Android emulator, not a physical device"
     device.acquire_root()
+    receiver_output = device.output / "receiver-build"
+    builder = Path(__file__).resolve().parents[1] / "tests/android/build-receiver.py"
+    subprocess.run([sys.executable, str(builder), "--output", str(receiver_output)], check=True, timeout=180)
+    if "package:" + RECEIVER in device.shell("pm list packages").splitlines():
+        device.command("uninstall", RECEIVER)
+    device.command("install", "-r", receiver_output / "receiver.apk", timeout=90)
     device.command("install", "-r", apk, timeout=180)
     package = device.shell(f"dumpsys package {PACKAGE}")
     assert "versionName=" + VERSION in package and "versionCode=2" in package
@@ -433,7 +437,8 @@ def run(device, apk):
     device.tool("open-reports")
     device.pick_file("Open backup as local workspace", exports["json"])
     device.confirm_alert("Open backup locally?", "Open backup")
-    device.wait("current-cash")
+    if device.find("Navigate up") is not None:
+        device.close_tool()
     device.cash("1475.65")
     device.checkpoint("Actual JSON document picker restores a separate local workspace")
     device.tap("tab-more")

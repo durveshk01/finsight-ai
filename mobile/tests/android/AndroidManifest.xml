@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="ai.finsight.verification" android:versionCode="1" android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="29" />
+    <application android:label="Verify export" android:allowBackup="false" android:debuggable="false">
+        <activity android:name=".ShareReceiverActivity" android:exported="true" android:label="Verify export">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
