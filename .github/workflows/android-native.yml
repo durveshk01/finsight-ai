@@ -41,7 +41,9 @@ jobs:
             done
             return 1
           }
-          test "$(retry_gh_api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID/jobs" --jq 'any(.jobs[]; .name == "android-build" and .conclusion == "success")')" = true
+          # Job-only reruns can omit the original build from the latest attempt.
+          # Check all attempts/pages for a successful build of this run's source.
+          test "$(retry_gh_api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID/jobs?filter=all&per_page=100" --paginate --slurp | jq -r 'any(.[].jobs[]; .name == "android-build" and .conclusion == "success")')" = true
           apk_sha=$(retry_gh_api "repos/$GITHUB_REPOSITORY/actions/runs/$APK_RUN_ID" --jq .head_sha)
           git fetch --no-tags --depth=1 origin "$apk_sha"
           git diff --exit-code "$apk_sha" HEAD -- mobile \

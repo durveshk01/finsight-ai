@@ -247,8 +247,27 @@ class Device:
         if not handoff:
             self.nodes()
             self.checkpoint("Native " + extension.upper() + " share sheet")
-            self.tap("Verify export")
-        self.wait("Received " + extension.upper() + " export", timeout=60)
+            # API 29 can ignore a tap while direct-share targets are loading.
+            # Retry only the receiver selection while the native chooser stays
+            # open; every path still requires the actual received file below.
+            for attempt in range(3):
+                self.tap("Verify export")
+                try:
+                    self.wait("Received " + extension.upper() + " export", timeout=20)
+                    break
+                except AssertionError:
+                    activities = self.shell("dumpsys activity activities")
+                    resumed = self.resumed_activity(activities)
+                    if attempt == 2 or not re.search(r"\b(?:ChooserActivity|ResolverActivity)(?:Launcher)?\b", resumed):
+                        raise
+                    prefix = self.output / f"native-sharing-retry-{extension}-{attempt + 1}"
+                    prefix.with_suffix(".log").write_text(activities, encoding="utf-8")
+                    self.nodes()
+                    prefix.with_suffix(".png").write_bytes(self.command("exec-out", "screencap", "-p", binary=True))
+                    prefix.with_suffix(".xml").write_text(self.command("exec-out", "cat", "/sdcard/finsight-window.xml"), encoding="utf-8")
+                    print(f"Android chooser remains open; retrying {extension.upper()} receiver selection", flush=True)
+        else:
+            self.wait("Received " + extension.upper() + " export", timeout=60)
         metadata = self.output / ("native-sharing-receipt-" + extension + ".json")
         destination = self.output / ("native-export." + extension)
         self.command("pull", f"/data/user/0/{RECEIVER}/files/received-{extension}.json", metadata)
